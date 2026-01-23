@@ -196,12 +196,14 @@ def calculate_ideal_position(stage_angle_rad):
     center_y = BASE_Y  # 2000μm
 
     # 実測値から計算した半径（1 pixel = 1 μm）
-    radius = 570.0  # 570μm = 0.57mm
-    
+    # 実測データ（30度）から逆算: sqrt(204.548^2 + 465.074^2) = 508.069 μm
+    radius = 508.069  # 508.069μm = 0.508mm
+
     # 実測データに基づく角度関係
-    # 理想位置角度 = 285° - ステージ角度
+    # 実測データ（30度）から逆算: atan2(-465.074, -204.548) + 30 = 276.259234°
+    # 理想位置角度 = 276.259234° - ステージ角度
     # (新スケール: 1 pixel = 1 μm)
-    ideal_angle_deg = 285.0 - stage_angle_deg
+    ideal_angle_deg = 276.259234 - stage_angle_deg
     ideal_angle_rad = math.radians(ideal_angle_deg)
     
     # 円弧上の位置を計算
