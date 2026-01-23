@@ -31,10 +31,10 @@ except ImportError:
 # "BATCH":       複数条件を自動で試行し、結果をファイル出力するモード
 # "SINGLE":      単一条件の初期/最終状態を画像出力するモード
 # "BATCH_PARALLEL" 並列処理
-MODE = "INTERACTIVE"
+MODE = "BATCH"
 
 # --- 出力フォルダ ---
-OUTPUT_DIR = "results_err8"
+OUTPUT_DIR = "results_err10"
 JP_FONT_FILENAME = "ipaexg.ttf"
 
 # --- シミュレーション基本設定 ---
@@ -52,8 +52,8 @@ SIMULATION_DURATION = 4.0
 ENABLE_FLOOR_FAIL_VALIDATION = True
 
 # --- 判定閾値設定 ---
-CONTACT_COUNT_THRESHOLD = 3      # 短冊方向の接触回数閾値（これ以上でNG判定対象）
-CONTACT_DIFF_THRESHOLD = 100.0     # 接触位置の累積差分閾値（μm）（これを超えたらNG）
+CONTACT_COUNT_THRESHOLD = 2      # 短冊方向の接触回数閾値（これ以上でNG判定対象）
+CONTACT_DIFF_THRESHOLD = 1.0     # 接触位置の累積差分閾値（μm）（これを超えたらNG）
 
 # --- 各モード用の設定 ---
 BATCH_PARAM_RANGES = {'angle': range(20, 21, 1), 'release_x_offset': range(-600, 300, 10),
@@ -791,12 +791,12 @@ def run_interactive_mode():
 
         # ===== UI要素の描画（固定サイズ、スケール変換されない） =====
         # パラメータ表示（左上）
-        param_labels = {"angle": "ステージ角度", "relative_angle": "相対リリース角度", "release_x_offset": "リリース X",
-                        "release_y_offset": "リリース Y"}
+        param_labels = {"angle": ("ステージ角度", "°"), "relative_angle": ("相対リリース角度", "°"), 
+                        "release_x_offset": ("リリース X", "μm"), "release_y_offset": ("リリース Y", "μm")}
         y_offset = 10
-        for p_name, label in param_labels.items():
+        for p_name, (label, unit) in param_labels.items():
             color = (0, 0, 200) if editing_param == p_name else (0, 0, 0)
-            text = f"{label}: {input_buffer if editing_param == p_name else params.get(p_name, 0)}"
+            text = f"{label}: {input_buffer if editing_param == p_name else params.get(p_name, 0)} {unit}"
             if editing_param == p_name and pygame.time.get_ticks() % 1000 < 500: text += "_"
             img = font.render(text, True, color)
             rect = screen.blit(img, (10, y_offset))
