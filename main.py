@@ -518,13 +518,12 @@ def run_interactive_mode():
                     display_height = int(HEIGHT * display_scale)
                     screen = pygame.display.set_mode((display_width, display_height))
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                # マウス座標を実座標に変換（縮小表示の影響を補正）
-                actual_mouse_pos = (int(event.pos[0] / display_scale), int(event.pos[1] / display_scale))
-                if editing_param and not param_rects.get(editing_param, pygame.Rect(0, 0, 0, 0)).collidepoint(
-                        actual_mouse_pos):
+                # UI要素のクリック判定（screen座標系をそのまま使用）
+                mouse_pos = event.pos
+                if editing_param and not param_rects.get(editing_param, pygame.Rect(0, 0, 0, 0)).collidepoint(mouse_pos):
                     editing_param, input_buffer = None, ""
                 for p_name, rect in param_rects.items():
-                    if rect.collidepoint(actual_mouse_pos): editing_param, input_buffer = p_name, ""; break
+                    if rect.collidepoint(mouse_pos): editing_param, input_buffer = p_name, ""; break
 
         # 短冊方向複数回接触の処理
         if wall_hit_flag[0] and not bar_is_settled:
@@ -685,10 +684,11 @@ def run_interactive_mode():
                 if is_success:
                     last_diff = f"理想位置との差分: {diff / PPM:.3f} mm"
 
+        # ===== 物理オブジェクトの描画（スケール変換される） =====
         draw_surface.fill(pygame.Color("white"));
         draw_coordinates(draw_surface, font_coords);
-        
-        
+
+
         # 床接触時のバーを赤くハイライト表示
         if floor_hit_position and floor_hit_angle is not None and floor_hit_alert_timer > 0:
             # 半透明の赤いバーを描画
@@ -703,7 +703,7 @@ def run_interactive_mode():
             pygame.draw.polygon(hit_surf, (255, 0, 0, alpha), hit_vertices)
             pygame.draw.polygon(hit_surf, (200, 0, 0, 255), hit_vertices, 3)  # 赤い枠線
             draw_surface.blit(hit_surf, (0, 0))
-        
+
         space.debug_draw(draw_options)
         release_pos = (BASE_X + params['release_x_offset'], BASE_Y - params['release_y_offset'])
         marker_color = (128, 0, 128) if not initial_pos_ok else (255, 0, 0)
@@ -715,86 +715,37 @@ def run_interactive_mode():
         line_end_x = release_pos[0] + 25 * math.cos(actual_release_angle_rad);
         line_end_y = release_pos[1] + 25 * math.sin(actual_release_angle_rad)
         pygame.draw.line(draw_surface, marker_color, release_pos, (line_end_x, line_end_y), 2)
-        param_labels = {"angle": "ステージ角度", "relative_angle": "相対リリース角度", "release_x_offset": "リリース X",
-                        "release_y_offset": "リリース Y"}
-        y_offset = 10
-        for p_name, label in param_labels.items():
-            color = (0, 0, 200) if editing_param == p_name else (0, 0, 0)
-            text = f"{label}: {input_buffer if editing_param == p_name else params.get(p_name, 0)}"
-            if editing_param == p_name and pygame.time.get_ticks() % 1000 < 500: text += "_"
-            img = font.render(text, True, color);
-            rect = draw_surface.blit(img, (10, y_offset));
-            param_rects[p_name] = rect;
-            y_offset += 25
-        y_offset += 5;
-        pygame.draw.line(draw_surface, (100, 100, 100), (10, y_offset), (300, y_offset), 1);
-        y_offset += 5
-        help_texts = ["操作方法:", "矢印キー: リリース位置", "W/S: ステージ角度", "Q/E: 相対リリース角度",
-                      "Shift+キー: 高速変更", "+/-/ホイール: 表示倍率", "R: 再落下", "M: 音声 " + ("ON" if enable_sound_alert else "OFF"), "クリック: 数値入力",
-                      f"短冊方向接触回数: {short_side_contact_count} (2回以上でアラート)", f"表示倍率: {int(display_scale*100)}%"]
-        for text in help_texts: draw_surface.blit(font.render(text, True, (0, 0, 0)), (10, y_offset)); y_offset += 22
-        if not initial_pos_ok: draw_surface.blit(font.render("初期位置が不正です！", True, (128, 0, 128)), (10, y_offset))
-
-        # マーカーの凡例を表示
-        y_offset += 10
-        pygame.draw.line(draw_surface, (100, 100, 100), (10, y_offset), (300, y_offset), 1)
-        y_offset += 10
-        draw_surface.blit(font_small.render("マーカー凡例:", True, (0, 0, 0)), (10, y_offset))
-        y_offset += 20
-        # BASE（赤）
-        pygame.draw.circle(draw_surface, (255, 0, 0), (25, y_offset), 6, 2)
-        draw_surface.blit(font_small.render("BASE(0,0) - ステージ基点", True, (255, 0, 0)), (40, y_offset - 8))
-        y_offset += 20
-        # Bar Center（青）
-        pygame.draw.circle(draw_surface, (0, 0, 255), (25, y_offset), 6, 2)
-        draw_surface.blit(font_small.render("Bar Center - バー重心位置", True, (0, 0, 255)), (40, y_offset - 8))
-        y_offset += 20
-        # Ideal Pos（緑）
-        pygame.draw.circle(draw_surface, (0, 255, 0), (25, y_offset), 6, 2)
-        draw_surface.blit(font_small.render("Ideal Pos - 理想位置", True, (0, 255, 0)), (40, y_offset - 8))
-        # リアルタイムで位置誤差を表示
+        # 物理空間のマーカーとラベルを描画（スケール変換される）
+        # データの計算と物理空間マーカーの描画
+        position_error = 0
+        error_color = (220, 100, 0)
+        debug_texts = []
         if dynamic_bars:
             stage_angle_rad, _ = get_release_angles()
             ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
             bar_body = dynamic_bars[0].body
             actual_x, actual_y = bar_body.position.x, bar_body.position.y
             position_error = math.sqrt((ideal_x - actual_x)**2 + (ideal_y - actual_y)**2)
-            
-            
-            # 位置誤差の表示（右上）- μm単位で表示
-            error_text = f"位置誤差: {position_error:.1f} μm"
             error_color = (0, 150, 0) if position_error <= SUCCESS_CRITERIA['position_tolerance'] else (220, 100, 0)
-            error_surf = font.render(error_text, True, error_color)
-            draw_surface.blit(error_surf, (WIDTH - error_surf.get_width() - 20, 110))
 
-            # デバッグ情報（理想位置と実際の位置の詳細）
-            stage_angle_rad, _ = get_release_angles()
+            # デバッグ情報を準備（後でUI描画で使用）
             stage_angle_deg = math.degrees(stage_angle_rad)
-
-            # BASE からの距離を計算
             dist_base_to_bar = math.sqrt((actual_x - BASE_X)**2 + (actual_y - BASE_Y)**2)
             dist_base_to_ideal = math.sqrt((ideal_x - BASE_X)**2 + (ideal_y - BASE_Y)**2)
+            debug_texts = [
+                f"ステージ角度: {-stage_angle_deg:.1f}°",
+                f"理想位置: ({ideal_x:.1f}, {ideal_y:.1f}) μm",
+                f"実際位置: ({actual_x:.1f}, {actual_y:.1f}) μm",
+                f"差分: X={actual_x-ideal_x:.1f}, Y={actual_y-ideal_y:.1f} μm",
+                f"BASE: ({BASE_X}, {BASE_Y}) μm",
+                f"BASE→Bar距離: {dist_base_to_bar:.1f} μm",
+                f"BASE→Ideal距離: {dist_base_to_ideal:.1f} μm"
+            ]
 
-            debug_text1 = f"ステージ角度: {-stage_angle_deg:.1f}°"  # 符号に注意
-            debug_text2 = f"理想位置: ({ideal_x:.1f}, {ideal_y:.1f}) μm"
-            debug_text3 = f"実際位置: ({actual_x:.1f}, {actual_y:.1f}) μm"
-            debug_text4 = f"差分: X={actual_x-ideal_x:.1f}, Y={actual_y-ideal_y:.1f} μm"
-            debug_text5 = f"BASE: ({BASE_X}, {BASE_Y}) μm"
-            debug_text6 = f"BASE→Bar距離: {dist_base_to_bar:.1f} μm"
-            debug_text7 = f"BASE→Ideal距離: {dist_base_to_ideal:.1f} μm"
-
-            draw_surface.blit(font_small.render(debug_text1, True, (200, 0, 0)), (WIDTH - 350, 140))
-            draw_surface.blit(font_small.render(debug_text2, True, (50, 50, 50)), (WIDTH - 350, 160))
-            draw_surface.blit(font_small.render(debug_text3, True, (50, 50, 50)), (WIDTH - 350, 180))
-            draw_surface.blit(font_small.render(debug_text4, True, (50, 50, 50)), (WIDTH - 350, 200))
-            draw_surface.blit(font_small.render(debug_text5, True, (100, 100, 100)), (WIDTH - 350, 220))
-            draw_surface.blit(font_small.render(debug_text6, True, (0, 0, 200)), (WIDTH - 350, 240))
-            draw_surface.blit(font_small.render(debug_text7, True, (0, 200, 0)), (WIDTH - 350, 260))
-
-            # 許容誤差の表示
-            tolerance_text = f"許容誤差: {SUCCESS_CRITERIA['position_tolerance']:.0f} μm"
-            tolerance_surf = font_small.render(tolerance_text, True, (100, 100, 100))
-            draw_surface.blit(tolerance_surf, (WIDTH - tolerance_surf.get_width() - 20, 135))
+            # ゼロ点から理想位置・バー重心への線
+            pygame.draw.line(draw_surface, (100, 200, 100), (int(BASE_X), int(BASE_Y)), (int(ideal_x), int(ideal_y)), 1)
+            pygame.draw.line(draw_surface, (150, 150, 150), (int(BASE_X), int(BASE_Y)), (int(actual_x), int(actual_y)), 1)
+            pygame.draw.line(draw_surface, error_color, (int(ideal_x), int(ideal_y)), (int(actual_x), int(actual_y)), 2)
 
             # ゼロ点（ステージ基点）をマーカーで表示（赤色）
             pygame.draw.circle(draw_surface, (255, 0, 0), (int(BASE_X), int(BASE_Y)), 8, 2)
@@ -817,81 +768,120 @@ def run_interactive_mode():
             ideal_label = font_small.render("Ideal Pos", True, (0, 255, 0))
             draw_surface.blit(ideal_label, (int(ideal_x) + 15, int(ideal_y) - 10))
 
-            # 理想位置と現在位置を線で結ぶ
-            pygame.draw.line(draw_surface, error_color, (int(ideal_x), int(ideal_y)), (int(actual_x), int(actual_y)), 2)
-
-            # ゼロ点からバー重心への線
-            pygame.draw.line(draw_surface, (150, 150, 150), (int(BASE_X), int(BASE_Y)), (int(actual_x), int(actual_y)), 1)
-
-            # ゼロ点から理想位置への線
-            pygame.draw.line(draw_surface, (100, 200, 100), (int(BASE_X), int(BASE_Y)), (int(ideal_x), int(ideal_y)), 1)
-        
-        if last_result:
-            img = font_large.render(last_result, True, result_color)
-            draw_surface.blit(img, (WIDTH - img.get_width() - 20, 20))
-            if last_diff: draw_surface.blit(font_small.render(last_diff, True, (0, 0, 0)),
-                                      (WIDTH - font_small.size(last_diff)[0] - 20, 80))
-        
-        # 複数回短冊方向接触アラートの表示
-        if multiple_contact_alert_timer > 0:
-            # 警告メッセージを中央に大きく表示
-            alert_text = "短冊方向複数回接触！"
-            alert_surf = font_large.render(alert_text, True, (255, 0, 100))
-            alert_rect = alert_surf.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 100))
-            
-            # 背景に半透明の紫色ボックス
-            bg_surf = pygame.Surface((alert_rect.width + 80, alert_rect.height + 20), pygame.SRCALPHA)
-            if LIBRARIES_INSTALLED:
-                bg_alpha = 200 + int(55 * np.sin(multiple_contact_alert_timer * 0.4))  # 点滅効果
-            else:
-                # numpy不使用時は単純な点滅
-                bg_alpha = 255 if (multiple_contact_alert_timer // 10) % 2 == 0 else 200
-            bg_surf.fill((255, 0, 100, bg_alpha))
-            draw_surface.blit(bg_surf, (alert_rect.x - 40, alert_rect.y - 10))
-
-            # 警告メッセージ本体
-            draw_surface.blit(alert_surf, alert_rect)
-
-            # 詳細メッセージ
-            detail_text = f"短冊方向の壁面接触が{short_side_contact_count}回発生しました"
-            detail_surf = font_small.render(detail_text, True, (255, 255, 255))
-            detail_rect = detail_surf.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 60))
-            draw_surface.blit(detail_surf, detail_rect)
-            
-            multiple_contact_alert_timer -= 1
-        
-        
-        # 床接触アラートの大きな警告メッセージ
-        if floor_hit_alert_timer > 0:
-            # 警告メッセージを中央に大きく表示
-            alert_text = "床接触！"
-            alert_surf = font_large.render(alert_text, True, (255, 0, 0))
-            alert_rect = alert_surf.get_rect(center=(WIDTH // 2, HEIGHT // 2))
-            
-            # 背景に半透明の赤いボックス
-            bg_surf = pygame.Surface((alert_rect.width + 40, alert_rect.height + 20), pygame.SRCALPHA)
-            if LIBRARIES_INSTALLED:
-                bg_alpha = 200 + int(55 * np.sin(floor_hit_alert_timer * 0.3))  # 点滅効果
-            else:
-                # numpy不使用時は単純な点滅
-                bg_alpha = 255 if (floor_hit_alert_timer // 10) % 2 == 0 else 200
-            bg_surf.fill((255, 50, 50, bg_alpha))
-            draw_surface.blit(bg_surf, (alert_rect.x - 20, alert_rect.y - 10))
-
-            # 警告メッセージ本体
-            draw_surface.blit(alert_surf, alert_rect)
-
-            # 詳細メッセージ
-            detail_text = "バーが床に接触しました"
-            detail_surf = font_small.render(detail_text, True, (255, 255, 255))
-            detail_rect = detail_surf.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 40))
-            draw_surface.blit(detail_surf, detail_rect)
-            
-            floor_hit_alert_timer -= 1
-
-        # 描画サーフェスを縮小して画面に表示
+        # ===== スケール変換 =====
         scaled_surface = pygame.transform.scale(draw_surface, (display_width, display_height))
         screen.blit(scaled_surface, (0, 0))
+
+        # ===== UI要素の描画（固定サイズ、スケール変換されない） =====
+        # パラメータ表示（左上）
+        param_labels = {"angle": "ステージ角度", "relative_angle": "相対リリース角度", "release_x_offset": "リリース X",
+                        "release_y_offset": "リリース Y"}
+        y_offset = 10
+        for p_name, label in param_labels.items():
+            color = (0, 0, 200) if editing_param == p_name else (0, 0, 0)
+            text = f"{label}: {input_buffer if editing_param == p_name else params.get(p_name, 0)}"
+            if editing_param == p_name and pygame.time.get_ticks() % 1000 < 500: text += "_"
+            img = font.render(text, True, color)
+            rect = screen.blit(img, (10, y_offset))
+            # param_rectsはクリック判定用（screen座標系）
+            param_rects[p_name] = rect
+            y_offset += 25
+        y_offset += 5
+        pygame.draw.line(screen, (100, 100, 100), (10, y_offset), (300, y_offset), 1)
+        y_offset += 5
+
+        # ヘルプテキスト
+        help_texts = ["操作方法:", "矢印キー: リリース位置", "W/S: ステージ角度", "Q/E: 相対リリース角度",
+                      "Shift+キー: 高速変更", "+/-/ホイール: 表示倍率", "R: 再落下", "M: 音声 " + ("ON" if enable_sound_alert else "OFF"), "クリック: 数値入力",
+                      f"短冊方向接触回数: {short_side_contact_count} (2回以上でアラート)", f"表示倍率: {int(display_scale*100)}%"]
+        for text in help_texts:
+            screen.blit(font.render(text, True, (0, 0, 0)), (10, y_offset))
+            y_offset += 22
+        if not initial_pos_ok:
+            screen.blit(font.render("初期位置が不正です！", True, (128, 0, 128)), (10, y_offset))
+
+        # マーカーの凡例を表示
+        y_offset += 10
+        pygame.draw.line(screen, (100, 100, 100), (10, y_offset), (300, y_offset), 1)
+        y_offset += 10
+        screen.blit(font_small.render("マーカー凡例:", True, (0, 0, 0)), (10, y_offset))
+        y_offset += 20
+        pygame.draw.circle(screen, (255, 0, 0), (25, y_offset), 6, 2)
+        screen.blit(font_small.render("BASE(0,0) - ステージ基点", True, (255, 0, 0)), (40, y_offset - 8))
+        y_offset += 20
+        pygame.draw.circle(screen, (0, 0, 255), (25, y_offset), 6, 2)
+        screen.blit(font_small.render("Bar Center - バー重心位置", True, (0, 0, 255)), (40, y_offset - 8))
+        y_offset += 20
+        pygame.draw.circle(screen, (0, 255, 0), (25, y_offset), 6, 2)
+        screen.blit(font_small.render("Ideal Pos - 理想位置", True, (0, 255, 0)), (40, y_offset - 8))
+
+        # 位置誤差の表示（右上）
+        if dynamic_bars:
+            error_text = f"位置誤差: {position_error:.1f} μm"
+            error_surf = font.render(error_text, True, error_color)
+            screen.blit(error_surf, (display_width - error_surf.get_width() - 20, 110))
+
+            # 許容誤差の表示
+            tolerance_text = f"許容誤差: {SUCCESS_CRITERIA['position_tolerance']:.0f} μm"
+            tolerance_surf = font_small.render(tolerance_text, True, (100, 100, 100))
+            screen.blit(tolerance_surf, (display_width - tolerance_surf.get_width() - 20, 135))
+
+            # デバッグ情報（右側）
+            debug_colors = [(200, 0, 0), (50, 50, 50), (50, 50, 50), (50, 50, 50), (100, 100, 100), (0, 0, 200), (0, 200, 0)]
+            for i, (text, color) in enumerate(zip(debug_texts, debug_colors)):
+                screen.blit(font_small.render(text, True, color), (display_width - 350, 140 + i * 20))
+
+        # 結果表示（右上）
+        if last_result:
+            img = font_large.render(last_result, True, result_color)
+            screen.blit(img, (display_width - img.get_width() - 20, 20))
+            if last_diff:
+                screen.blit(font_small.render(last_diff, True, (0, 0, 0)),
+                           (display_width - font_small.size(last_diff)[0] - 20, 80))
+
+        # 複数回短冊方向接触アラート（中央）
+        if multiple_contact_alert_timer > 0:
+            alert_text = "短冊方向複数回接触！"
+            alert_surf = font_large.render(alert_text, True, (255, 0, 100))
+            alert_rect = alert_surf.get_rect(center=(display_width // 2, display_height // 2 - 100))
+
+            bg_surf = pygame.Surface((alert_rect.width + 80, alert_rect.height + 20), pygame.SRCALPHA)
+            if LIBRARIES_INSTALLED:
+                bg_alpha = 200 + int(55 * np.sin(multiple_contact_alert_timer * 0.4))
+            else:
+                bg_alpha = 255 if (multiple_contact_alert_timer // 10) % 2 == 0 else 200
+            bg_surf.fill((255, 0, 100, bg_alpha))
+            screen.blit(bg_surf, (alert_rect.x - 40, alert_rect.y - 10))
+            screen.blit(alert_surf, alert_rect)
+
+            detail_text = f"短冊方向の壁面接触が{short_side_contact_count}回発生しました"
+            detail_surf = font_small.render(detail_text, True, (255, 255, 255))
+            detail_rect = detail_surf.get_rect(center=(display_width // 2, display_height // 2 - 60))
+            screen.blit(detail_surf, detail_rect)
+
+            multiple_contact_alert_timer -= 1
+
+        # 床接触アラート（中央）
+        if floor_hit_alert_timer > 0:
+            alert_text = "床接触！"
+            alert_surf = font_large.render(alert_text, True, (255, 0, 0))
+            alert_rect = alert_surf.get_rect(center=(display_width // 2, display_height // 2))
+
+            bg_surf = pygame.Surface((alert_rect.width + 40, alert_rect.height + 20), pygame.SRCALPHA)
+            if LIBRARIES_INSTALLED:
+                bg_alpha = 200 + int(55 * np.sin(floor_hit_alert_timer * 0.3))
+            else:
+                bg_alpha = 255 if (floor_hit_alert_timer // 10) % 2 == 0 else 200
+            bg_surf.fill((255, 50, 50, bg_alpha))
+            screen.blit(bg_surf, (alert_rect.x - 20, alert_rect.y - 10))
+            screen.blit(alert_surf, alert_rect)
+
+            detail_text = "バーが床に接触しました"
+            detail_surf = font_small.render(detail_text, True, (255, 255, 255))
+            detail_rect = detail_surf.get_rect(center=(display_width // 2, display_height // 2 + 40))
+            screen.blit(detail_surf, detail_rect)
+
+            floor_hit_alert_timer -= 1
 
         pygame.display.flip()
         dt = 1.0 / 60.0
