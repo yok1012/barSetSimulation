@@ -301,13 +301,21 @@ def run_interactive_mode():
                                                                                                                   20); font_coords = pygame.font.Font(
             None, 20)
 
-    # 表示倍率機能を追加
-    display_scale = 0.4  # 初期表示倍率 40%
+    # 表示倍率機能を追加 - 画面サイズに合わせて自動調整
+    display_info = pygame.display.Info()
+    screen_width = display_info.current_w
+    screen_height = display_info.current_h
+
+    # 画面サイズの90%に収まるように初期倍率を計算（タスクバーやウィンドウ装飾を考慮）
+    max_scale_x = (screen_width * 0.9) / WIDTH
+    max_scale_y = (screen_height * 0.9) / HEIGHT
+    display_scale = min(max_scale_x, max_scale_y, 1.0)  # 最大100%
+
     display_width = int(WIDTH * display_scale)
     display_height = int(HEIGHT * display_scale)
 
-    # 画面は縮小サイズで作成
-    screen = pygame.display.set_mode((display_width, display_height))
+    # 画面はリサイズ可能な縮小サイズで作成
+    screen = pygame.display.set_mode((display_width, display_height), pygame.RESIZABLE)
     # 描画用は実サイズのサーフェス
     draw_surface = pygame.Surface((WIDTH, HEIGHT))
 
@@ -497,12 +505,12 @@ def run_interactive_mode():
                         display_scale = min(1.0, display_scale + 0.1)  # 最大100%
                         display_width = int(WIDTH * display_scale)
                         display_height = int(HEIGHT * display_scale)
-                        screen = pygame.display.set_mode((display_width, display_height))
+                        screen = pygame.display.set_mode((display_width, display_height), pygame.RESIZABLE)
                     if event.key in [pygame.K_MINUS, pygame.K_KP_MINUS]:
                         display_scale = max(0.2, display_scale - 0.1)  # 最小20%
                         display_width = int(WIDTH * display_scale)
                         display_height = int(HEIGHT * display_scale)
-                        screen = pygame.display.set_mode((display_width, display_height))
+                        screen = pygame.display.set_mode((display_width, display_height), pygame.RESIZABLE)
 
                     if config_changed: reset_simulation(full_reset=angle_changed)
             if event.type == pygame.MOUSEWHEEL:
@@ -511,12 +519,24 @@ def run_interactive_mode():
                     display_scale = min(1.0, display_scale + 0.1)
                     display_width = int(WIDTH * display_scale)
                     display_height = int(HEIGHT * display_scale)
-                    screen = pygame.display.set_mode((display_width, display_height))
+                    screen = pygame.display.set_mode((display_width, display_height), pygame.RESIZABLE)
                 elif event.y < 0:  # 下にスクロール = ズームアウト
                     display_scale = max(0.2, display_scale - 0.1)
                     display_width = int(WIDTH * display_scale)
                     display_height = int(HEIGHT * display_scale)
-                    screen = pygame.display.set_mode((display_width, display_height))
+                    screen = pygame.display.set_mode((display_width, display_height), pygame.RESIZABLE)
+            if event.type == pygame.VIDEORESIZE:
+                # ウィンドウがリサイズされたときの処理
+                display_width = event.w
+                display_height = event.h
+                # アスペクト比を維持しながら表示倍率を計算
+                scale_x = display_width / WIDTH
+                scale_y = display_height / HEIGHT
+                display_scale = min(scale_x, scale_y)  # 小さい方を採用してアスペクト比を維持
+                # 実際のウィンドウサイズを倍率に合わせて調整
+                display_width = int(WIDTH * display_scale)
+                display_height = int(HEIGHT * display_scale)
+                screen = pygame.display.set_mode((display_width, display_height), pygame.RESIZABLE)
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 # UI要素のクリック判定（screen座標系をそのまま使用）
                 mouse_pos = event.pos
