@@ -1,0 +1,27 @@
+{
+	"folders": [
+		{
+			"path": ".",
+			"name": "main"
+		},
+		{
+			"path": "features/codex_update",
+			"name": "features/codex_update"
+		},
+		{
+			"path": "features/v_claude",
+			"name": "features/v_claude"
+		},
+		{
+			"path": "experiments/v_gemini",
+			"name": "experiments/v_gemini"
+		}
+	],
+	"settings": {
+		"python.defaultInterpreterPath": "${workspaceFolder:main}/venv/bin/python",
+		"files.exclude": {
+			"**/__pycache__": true,
+			"**/*.pyc": true
+		}
+	}
+}
