@@ -38,7 +38,7 @@ OUTPUT_DIR = "results_err8"
 JP_FONT_FILENAME = "ipaexg.ttf"
 
 # --- シミュレーション基本設定 ---
-BAR_FRICTION = 1.2
+BAR_FRICTION = 2.7
 BAR_ELASTICITY = 0.6
 WALL_FRICTION = 1.2
 WALL_ELASTICITY = 0.6
@@ -50,6 +50,10 @@ WIDTH, HEIGHT = 4000, 4000  # 4mm × 4mm (1 pixel = 1 μm)
 PPM = 1000000.0         # 1,000,000 pixels/m = 1 pixel/μm
 SIMULATION_DURATION = 4.0
 ENABLE_FLOOR_FAIL_VALIDATION = True
+
+# --- 判定閾値設定 ---
+CONTACT_COUNT_THRESHOLD = 3      # 短冊方向の接触回数閾値（これ以上でNG判定対象）
+CONTACT_DIFF_THRESHOLD = 100.0     # 接触位置の累積差分閾値（μm）（これを超えたらNG）
 
 # --- 各モード用の設定 ---
 BATCH_PARAM_RANGES = {'angle': range(20, 21, 1), 'release_x_offset': range(-600, 300, 10),
@@ -155,7 +159,7 @@ def check_success(bar_shape, slope_segment, wall_segment, slope_angle_rad, floor
     
     if slope_segment is None or wall_segment is None: return False, "ステージ未定義"
 
-    touching_slope, touching_wall = False, False
+    touching_slope = False
 
     # 別の方法で接触判定を行う - space.shape_queryを使用
     space = bar_shape.space
@@ -165,7 +169,6 @@ def check_success(bar_shape, slope_segment, wall_segment, slope_angle_rad, floor
         for contact_info in contacts:
             other_shape = contact_info.shape
             if other_shape == slope_segment: touching_slope = True
-            if other_shape == wall_segment: touching_wall = True
 
     # 未接触判定を緩和：斜面接触のみで成功とする
     if not touching_slope: return False, "未接触"
@@ -341,6 +344,7 @@ def run_interactive_mode():
     wall_hit_position = None  # 壁面接触時のバーの位置
     wall_hit_angle = None  # 壁面接触時のバーの角度
     short_side_contact_count = 0  # 短冊方向の接触回数
+    accumulated_contact_diff = 0.0 # 接触位置の累積差分
     multiple_contact_alert_timer = 0  # 複数回接触アラートの表示タイマー
     contact_history = []  # 接触履歴を記録
 
@@ -359,12 +363,10 @@ def run_interactive_mode():
     handler.data["hit_angle"] = None
     
     def wall_contact_handler(arbiter, space, data):
-        nonlocal short_side_contact_count, contact_history
+        nonlocal short_side_contact_count, contact_history, accumulated_contact_diff
         
         # バーがまだ安定していない場合のみチェック
         if not bar_is_settled and dynamic_bars:
-            current_time = pygame.time.get_ticks()
-            
             # 接触点を取得
             contact_points = arbiter.contact_point_set.points
             if contact_points:
@@ -375,37 +377,31 @@ def run_interactive_mode():
                 
                 # 短冊方向の接触を処理（"short_side" または "both"）
                 if contact_side in ["short_side", "both"]:
-                    # 過去の接触と重複していないかチェック
-                    is_new_contact = True
-                    for prev_time, prev_point in contact_history:
-                        # 2秒以内かつ5ピクセル以内の接触は重複とみなす
-                        time_diff = current_time - prev_time
-                        if time_diff < 2000:  # 2秒以内
-                            point_dist = math.sqrt((contact_point[0] - prev_point[0])**2 + (contact_point[1] - prev_point[1])**2)
-                            if point_dist < 10:  # 5ピクセル以内
-                                is_new_contact = False
-                                break
+                    # 以前の接触点との距離を計算
+                    diff = 0.0
+                    if contact_history:
+                        last_time, last_point = contact_history[-1]
+                        diff = math.sqrt((contact_point[0] - last_point[0])**2 + (contact_point[1] - last_point[1])**2)
                     
-                    # 新しい接触の場合のみカウント
-                    if is_new_contact:
-                        short_side_contact_count += 1
-                        contact_history.append((current_time, contact_point))
-                        
-                        # デバッグ情報を追加
-                        print(f"短冊接触検出: {contact_side}, 回数: {short_side_contact_count}, 位置: ({contact_point[0]:.1f}, {contact_point[1]:.1f})")
-                        
-                        # 古い履歴を削除（5秒以上前）
-                        contact_history = [(t, p) for t, p in contact_history if current_time - t < 5000]
-                        
-                        data["contact_count"] = short_side_contact_count
-                        
-                        # 2回以上の短冊方向接触でアラート
-                        if short_side_contact_count >= 2:
-                            data["hit_flag"][0] = True
-                            data["hit_position"] = dynamic_bars[0].body.position.x, dynamic_bars[0].body.position.y
-                            data["hit_angle"] = dynamic_bars[0].body.angle
-                            data["contact_side"] = "multiple_short_side"
-                            data["contact_point"] = contact_point
+                    # 差分を積算
+                    accumulated_contact_diff += diff
+                    
+                    # カウントと履歴を更新
+                    short_side_contact_count += 1
+                    contact_history.append((pygame.time.get_ticks(), contact_point))
+                    
+                    # デバッグ情報を追加
+                    print(f"短冊接触検出: {contact_side}, 回数: {short_side_contact_count}, 位置: ({contact_point[0]:.1f}, {contact_point[1]:.1f}), 差分: {diff:.3f}, 累積: {accumulated_contact_diff:.3f}")
+                    
+                    data["contact_count"] = short_side_contact_count
+                    
+                    # 2回以上の短冊方向接触 かつ 累積差分が閾値を超えたらNG
+                    if short_side_contact_count >= CONTACT_COUNT_THRESHOLD and accumulated_contact_diff > CONTACT_DIFF_THRESHOLD:
+                        data["hit_flag"][0] = True
+                        data["hit_position"] = dynamic_bars[0].body.position.x, dynamic_bars[0].body.position.y
+                        data["hit_angle"] = dynamic_bars[0].body.angle
+                        data["contact_side"] = "multiple_short_side"
+                        data["contact_point"] = contact_point
         return True
     
     wall_handler = space.add_collision_handler(BAR_COLLISION_TYPE, WALL_COLLISION_TYPE);
@@ -425,7 +421,7 @@ def run_interactive_mode():
     def reset_simulation(full_reset=True, check_pos=True):
         nonlocal last_result, settle_frames_count, bar_is_settled, static_shapes, initial_pos_ok, last_diff
         nonlocal floor_hit_alert_timer, floor_hit_position, floor_hit_angle
-        nonlocal short_side_contact_count, multiple_contact_alert_timer, contact_history
+        nonlocal short_side_contact_count, accumulated_contact_diff, multiple_contact_alert_timer, contact_history
         stage_angle_rad, actual_release_angle_rad = get_release_angles()
         if full_reset:
             for shape in dynamic_bars: space.remove(shape, shape.body)
@@ -453,6 +449,7 @@ def run_interactive_mode():
         wall_handler.data["contact_count"] = 0
         # 接触回数をリセット
         short_side_contact_count = 0
+        accumulated_contact_diff = 0.0
         multiple_contact_alert_timer = 0
         contact_history.clear()
         handler.data["hit_angle"] = None
@@ -1170,6 +1167,7 @@ def run_single_condition_parallel(params_data):
             floor_hit_flag = [False]
             wall_hit_flag = [False]
             short_side_contact_count = 0
+            accumulated_contact_diff = 0.0
             contact_history = []
             
             # 衝突ハンドラーは簡単な実装を使用
@@ -1202,48 +1200,50 @@ def run_single_condition_parallel(params_data):
             bar = create_bar(space, (release_pos_x, release_pos_y), trial_release_angle, is_visual=False)
             wall_handler_data["bar_body"] = bar.body
             
+            # 衝突ハンドラーの設定
+            def parallel_wall_handler(arbiter, space, data):
+                nonlocal short_side_contact_count, contact_history, accumulated_contact_diff
+                try:
+                    contact_points = arbiter.contact_point_set.points
+                    if contact_points:
+                        contact_point = contact_points[0].point_a
+                        contact_side = check_bar_contact_side(bar.body, None, contact_point)
+                        
+                        if contact_side in ["short_side", "both"]:
+                            diff = 0.0
+                            if contact_history:
+                                _, last_point = contact_history[-1]
+                                diff = math.sqrt((contact_point[0] - last_point[0])**2 + (contact_point[1] - last_point[1])**2)
+                            
+                            accumulated_contact_diff += diff
+                            short_side_contact_count += 1
+                            contact_history.append((0, contact_point)) # Time is not strictly needed for logic now
+                            
+                            if short_side_contact_count >= CONTACT_COUNT_THRESHOLD and accumulated_contact_diff > CONTACT_DIFF_THRESHOLD:
+                                wall_hit_flag[0] = True
+                except:
+                    pass
+                return True
+
+            def parallel_floor_handler(arbiter, space, data):
+                floor_hit_flag[0] = True
+                return True
+
+            try:
+                wh = space.add_collision_handler(BAR_COLLISION_TYPE, WALL_COLLISION_TYPE)
+                wh.begin = parallel_wall_handler
+                fh = space.add_collision_handler(BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE)
+                fh.begin = parallel_floor_handler
+            except:
+                pass
+
             # シミュレーション実行
             for step in range(int(SIMULATION_DURATION * 60)):
                 space.step(1.0 / 60.0)
                 
-                # 簡易衝突判定
-                if bar.body.position.y >= HEIGHT - 10:  # 床接触の簡易判定
+                # 床接触の簡易判定（ハンドラーが動作しない場合のバックアップ）
+                if bar.body.position.y >= HEIGHT - 10:
                     floor_hit_flag[0] = True
-                
-                # 壁面接触の詳細判定
-                try:
-                    contacts = space.shape_query(bar)
-                    current_time = step * (1000 / 60)  # ミリ秒に変換
-                    
-                    for contact_info in contacts:
-                        if contact_info.shape.collision_type == WALL_COLLISION_TYPE:
-                            # 接触点を取得
-                            contact_point = contact_info.contact_point_set.point if hasattr(contact_info, 'contact_point_set') else bar.body.position
-                            
-                            # 詳細な面判定を使用
-                            contact_side = check_bar_contact_side(bar.body, None, contact_point)
-                            
-                            if contact_side in ["short_side", "both"]:
-                                # 重複チェック
-                                is_new_contact = True
-                                for prev_time, prev_point in contact_history:
-                                    time_diff = current_time - prev_time
-                                    if time_diff < 2000:
-                                        point_dist = math.sqrt((contact_point[0] - prev_point[0])**2 + (contact_point[1] - prev_point[1])**2) if contact_point != bar.body.position else 0
-                                        if point_dist < 5:
-                                            is_new_contact = False
-                                            break
-                                
-                                if is_new_contact:
-                                    short_side_contact_count += 1
-                                    contact_history.append((current_time, contact_point))
-                                    contact_history = [(t, p) for t, p in contact_history if current_time - t < 5000]
-                                    
-                                    if short_side_contact_count >= 2:
-                                        wall_hit_flag[0] = True
-                                        break
-                except:
-                    pass
                 
                 if (floor_hit_flag[0] and ENABLE_FLOOR_FAIL_VALIDATION) or wall_hit_flag[0]:
                     break
@@ -1522,6 +1522,7 @@ def run_batch_mode():
             floor_hit_flag = [False]
             wall_hit_flag = [False]
             short_side_contact_count = 0
+            accumulated_contact_diff = 0.0
             contact_history = []
 
             def floor_contact_handler(arbiter, space, data):
@@ -1564,7 +1565,7 @@ def run_batch_mode():
                 return True
                 
             def collision_handler_wall(arbiter, space, data):
-                nonlocal short_side_contact_count, contact_history
+                nonlocal short_side_contact_count, contact_history, accumulated_contact_diff
                 current_time = pygame.time.get_ticks()
                 
                 try:
@@ -1573,23 +1574,21 @@ def run_batch_mode():
                         contact_point = contact_points[0].point_a
                         contact_side = check_bar_contact_side(wall_handler_data["bar_body"], None, contact_point)
                         
-                        if contact_side == "short_side":
-                            is_new_contact = True
-                            for prev_time, prev_point in contact_history:
-                                time_diff = current_time - prev_time
-                                if time_diff < 1000:
-                                    point_dist = math.sqrt((contact_point[0] - prev_point[0])**2 + (contact_point[1] - prev_point[1])**2)
-                                    if point_dist < 30:
-                                        is_new_contact = False
-                                        break
+                        if contact_side in ["short_side", "both"]:
+                            # 以前の接触点との距離を計算
+                            diff = 0.0
+                            if contact_history:
+                                last_time, last_point = contact_history[-1]
+                                diff = math.sqrt((contact_point[0] - last_point[0])**2 + (contact_point[1] - last_point[1])**2)
                             
-                            if is_new_contact:
-                                short_side_contact_count += 1
-                                contact_history.append((current_time, contact_point))
-                                contact_history = [(t, p) for t, p in contact_history if current_time - t < 5000]
-                                
-                                if short_side_contact_count >= 2:
-                                    wall_hit_flag[0] = True
+                            # 差分を積算
+                            accumulated_contact_diff += diff
+                            
+                            short_side_contact_count += 1
+                            contact_history.append((current_time, contact_point))
+                            
+                            if short_side_contact_count >= CONTACT_COUNT_THRESHOLD and accumulated_contact_diff > CONTACT_DIFF_THRESHOLD:
+                                wall_hit_flag[0] = True
                 except:
                     # 衝突点情報が取得できない場合はスキップ
                     pass
@@ -1666,7 +1665,7 @@ def run_batch_mode():
                                 bar_angle = bar.body.angle
                                 if abs(math.sin(bar_angle)) > 0.7:  # バーが垂直に近い場合
                                     short_side_contact_count += 1
-                                    if short_side_contact_count >= 2:
+                                    if short_side_contact_count >= CONTACT_COUNT_THRESHOLD:
                                         wall_hit_flag[0] = True
                                         break
                     except:
