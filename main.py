@@ -31,14 +31,14 @@ except ImportError:
 # "BATCH":       複数条件を自動で試行し、結果をファイル出力するモード
 # "SINGLE":      単一条件の初期/最終状態を画像出力するモード
 # "BATCH_PARALLEL" 並列処理
-MODE = "BATCH"
+MODE = "BATCH_PARALLEL"
 
 # --- 出力フォルダ ---
-OUTPUT_DIR = "results_err10"
+OUTPUT_DIR = "results_err12"
 JP_FONT_FILENAME = "ipaexg.ttf"
 
 # --- シミュレーション基本設定 ---
-BAR_FRICTION = 2.7
+BAR_FRICTION = 1.5
 BAR_ELASTICITY = 0.6
 WALL_FRICTION = 1.2
 WALL_ELASTICITY = 0.6
@@ -59,9 +59,9 @@ CONTACT_DIFF_THRESHOLD = 1.0     # 接触位置の累積差分閾値（μm）（
 BATCH_PARAM_RANGES = {'angle': range(20, 21, 1), 'release_x_offset': range(-600, 300, 10),
                       'release_y_offset': range(200, 1000, 10), 'relative_angle': [0]}  # 相対角度は固定
 # バラツキ設定：X, Y位置、相対角度の標準偏差（1 pixel = 1 μm）
-RELEASE_X_VARIABILITY = 20  # X位置のバラツキ 20μm
-RELEASE_Y_VARIABILITY = 20  # Y位置のバラツキ 20μm
-RELATIVE_ANGLE_VARIABILITY = 1.0  # 相対角度のバラツキ（度）
+RELEASE_X_VARIABILITY = 0  # X位置のバラツキ 20μm
+RELEASE_Y_VARIABILITY = 0  # Y位置のバラツキ 20μm
+RELATIVE_ANGLE_VARIABILITY = 5.0  # 相対角度のバラツキ（度）
 NUM_TRIALS_PER_CONDITION = 30  # 各条件での試行回数
 SINGLE_CONDITION_PARAMS = {'angle': 30, 'release_x_offset': 0, 'release_y_offset': 600, 'relative_angle': 0}
 
@@ -1157,11 +1157,6 @@ def run_single_condition_parallel(params_data):
     
     for trial_num in trial_range:
         try:
-            # Pygame初期化（各プロセスで必要）
-            os.environ['SDL_VIDEODRIVER'] = 'dummy'
-            import pygame
-            pygame.init()
-            
             space = pymunk.Space()
             space.gravity = (0, 981)
             floor_hit_flag = [False]
@@ -1274,8 +1269,6 @@ def run_single_condition_parallel(params_data):
             if is_success:
                 successful_runs_data.append({'pos': bar.body.position, 'angle': bar.body.angle})
                 
-            pygame.quit()
-            
         except Exception as e:
             trial_results.append({
                 'trial': trial_num,
@@ -1294,6 +1287,8 @@ def run_batch_mode_parallel():
     """
     並列処理版のBATCHモード
     """
+    import traceback
+    
     if not LIBRARIES_INSTALLED:
         print("エラー: BATCHモードに必要なライブラリがありません。")
         return
@@ -1306,7 +1301,7 @@ def run_batch_mode_parallel():
     
     # CPU数を取得
     cpu_cores = cpu_count()
-    max_workers = min(cpu_cores, 8)  # 最大8プロセスに制限
+    max_workers = min(cpu_cores, 64)  # AWS大型インスタンス用に64プロセスまで対応
     print(f"利用可能CPU数: {cpu_cores}, 使用プロセス数: {max_workers}")
     
     param_names = list(BATCH_PARAM_RANGES.keys())
@@ -1341,6 +1336,76 @@ def run_batch_mode_parallel():
     completed_tasks = 0
     start_time = time.time()
     
+    def save_current_results(current_results_list):
+        if not current_results_list: return
+        
+        # 結果を統合
+        condition_results = {}
+        for params, successful_runs, trial_results in current_results_list:
+            key = tuple(sorted(params.items()))
+            if key not in condition_results:
+                condition_results[key] = {'params': params, 'successful_runs': [], 'trial_results': []}
+            condition_results[key]['successful_runs'].extend(successful_runs)
+            condition_results[key]['trial_results'].extend(trial_results)
+            
+        results_data = []
+        for key, data in condition_results.items():
+            params = data['params']
+            successful_runs = data['successful_runs']
+            trial_results = data['trial_results']
+            
+            # 全ての試行が揃っていない場合でも集計する
+            if not trial_results: continue
+            
+            success_rate = (len(successful_runs) / len(trial_results)) * 100
+            stage_angle_rad = math.radians(-params['angle'])
+            
+            failure_reasons = {}
+            for result in trial_results:
+                if not result['success']:
+                    reason = result['reason']
+                    failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+            
+            short_contact_counts = [result['short_contacts'] for result in trial_results]
+            avg_short_contacts = np.mean(short_contact_counts) if short_contact_counts else 0
+            max_short_contacts = max(short_contact_counts) if short_contact_counts else 0
+            
+            ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
+            avg_final_x = np.mean([run['pos'].x for run in successful_runs]) if successful_runs else None
+            avg_final_y = np.mean([run['pos'].y for run in successful_runs]) if successful_runs else None
+            diff = math.sqrt((ideal_x - avg_final_x) ** 2 + (ideal_y - avg_final_y) ** 2) if avg_final_x is not None else None
+            
+            x_offsets = [result['x_offset'] for result in trial_results]
+            y_offsets = [result['y_offset'] for result in trial_results]
+            angle_offsets = [result['angle_offset'] for result in trial_results]
+            
+            condition_result = {
+                **params,
+                'success_rate': success_rate,
+                'ideal_x': ideal_x, 'ideal_y': ideal_y,
+                'avg_final_x': avg_final_x, 'avg_final_y': avg_final_y,
+                'difference_from_ideal_px': diff,
+                'avg_short_contacts': avg_short_contacts,
+                'max_short_contacts': max_short_contacts,
+                'failures_floor': failure_reasons.get('floor_contact', 0),
+                'failures_multi_short': failure_reasons.get('multiple_short_contacts', 0),
+                'failures_unstable': failure_reasons.get('不安定', 0),
+                'failures_angle': failure_reasons.get('角度不正', 0),
+                'failures_no_contact': failure_reasons.get('未接触', 0),
+                'failures_invalid_pos': failure_reasons.get('invalid_initial_position', 0),
+                'x_offset_std': np.std(x_offsets),
+                'y_offset_std': np.std(y_offsets),
+                'angle_offset_std': np.std(angle_offsets)
+            }
+            results_data.append(condition_result)
+            
+        if results_data:
+            df = pd.DataFrame(results_data)
+            if 'difference_from_ideal_px' in df.columns:
+                df['difference_from_ideal_mm'] = df['difference_from_ideal_px'] / PPM
+            csv_filepath = os.path.join(OUTPUT_DIR, "simulation_results_parallel.csv")
+            df.to_csv(csv_filepath, index=False, float_format='%.3f')
+
     # 並列処理実行
     with Pool(processes=max_workers) as pool:
         # 非同期でタスクを投入
@@ -1356,6 +1421,10 @@ def run_batch_mode_parallel():
                 all_results.append(result)
                 completed_tasks += 1
                 
+                # 中間保存（5タスクごと）
+                if completed_tasks % 5 == 0:
+                    save_current_results(all_results)
+                
                 # 進捗表示
                 progress = (completed_tasks / len(async_results)) * 100
                 elapsed = time.time() - start_time
@@ -1367,130 +1436,44 @@ def run_batch_mode_parallel():
                 
             except Exception as e:
                 print(f"\nタスク {i+1} でエラーが発生しました: {e}")
+                traceback.print_exc()
                 completed_tasks += 1
     
     print(f"\n\n=== 並列処理完了 ===")
     print(f"総実行時間: {time.time() - start_time:.1f}秒")
     
-    # 結果を統合
-    print("結果を統合中...")
-    condition_results = {}
+    # 最終結果の保存
+    save_current_results(all_results)
     
-    for params, successful_runs, trial_results in all_results:
-        # パラメータをキーとして結果を統合
-        key = tuple(sorted(params.items()))
-        
-        if key not in condition_results:
-            condition_results[key] = {
-                'params': params,
-                'successful_runs': [],
-                'trial_results': []
-            }
-        
-        condition_results[key]['successful_runs'].extend(successful_runs)
-        condition_results[key]['trial_results'].extend(trial_results)
-    
-    # 最終的な結果データを作成
-    results_data = []
-    
-    for key, data in condition_results.items():
-        params = data['params']
-        successful_runs = data['successful_runs']
-        trial_results = data['trial_results']
-        
-        success_rate = (len(successful_runs) / len(trial_results)) * 100 if trial_results else 0
-        
-        # 統計計算
-        stage_angle_rad = math.radians(-params['angle'])
-        
-        # 失敗理由の集計
-        failure_reasons = {}
-        for result in trial_results:
-            if not result['success']:
-                reason = result['reason']
-                failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
-        
-        # 短冊方向接触の統計
-        short_contact_counts = [result['short_contacts'] for result in trial_results]
-        avg_short_contacts = np.mean(short_contact_counts) if short_contact_counts else 0
-        max_short_contacts = max(short_contact_counts) if short_contact_counts else 0
-        
-        ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
-        avg_final_x = np.mean([run['pos'].x for run in successful_runs]) if successful_runs else None
-        avg_final_y = np.mean([run['pos'].y for run in successful_runs]) if successful_runs else None
-        diff = math.sqrt((ideal_x - avg_final_x) ** 2 + (ideal_y - avg_final_y) ** 2) if avg_final_x is not None else None
-        
-        # バラツキの統計
-        x_offsets = [result['x_offset'] for result in trial_results]
-        y_offsets = [result['y_offset'] for result in trial_results]
-        angle_offsets = [result['angle_offset'] for result in trial_results]
-        
-        condition_result = {
-            **params,
-            'success_rate': success_rate,
-            'ideal_x': ideal_x, 'ideal_y': ideal_y,
-            'avg_final_x': avg_final_x, 'avg_final_y': avg_final_y,
-            'difference_from_ideal_px': diff,
-            'avg_short_contacts': avg_short_contacts,
-            'max_short_contacts': max_short_contacts,
-            'failures_floor': failure_reasons.get('floor_contact', 0),
-            'failures_multi_short': failure_reasons.get('multiple_short_contacts', 0),
-            'failures_unstable': failure_reasons.get('不安定', 0),
-            'failures_angle': failure_reasons.get('角度不正', 0),
-            'failures_no_contact': failure_reasons.get('未接触', 0),
-            'failures_invalid_pos': failure_reasons.get('invalid_initial_position', 0),
-            'x_offset_std': np.std(x_offsets),
-            'y_offset_std': np.std(y_offsets),
-            'angle_offset_std': np.std(angle_offsets)
-        }
-        
-        results_data.append(condition_result)
-    
-    # 結果を表示・保存（通常のBATCHモードと同じ）
-    if not results_data:
-        print("試行結果がありません。")
-        return
-    
-    df = pd.DataFrame(results_data)
-    if 'difference_from_ideal_px' in df.columns:
-        df['difference_from_ideal_mm'] = df['difference_from_ideal_px'] / PPM
-    
-    # 結果の概要を表示
-    print(f"\n=== 高速BATCH実行結果概要 ===")
-    print(f"総パラメータ条件数: {len(df)}")
-    print(f"各条件の試行回数: {NUM_TRIALS_PER_CONDITION}")
-    print(f"総試行回数: {len(df) * NUM_TRIALS_PER_CONDITION}")
-    print(f"")
-    print(f"全体成功率: {df['success_rate'].mean():.1f}% (範囲: {df['success_rate'].min():.1f}%-{df['success_rate'].max():.1f}%)")
-    print(f"平均短冊接触回数: {df['avg_short_contacts'].mean():.2f}回")
-    print(f"最大短冊接触回数: {df['max_short_contacts'].max():.0f}回")
-    print(f"")
-    print(f"失敗原因別統計:")
-    print(f"  床接触: {df['failures_floor'].sum()}回")
-    print(f"  複数短冊接触: {df['failures_multi_short'].sum()}回")
-    print(f"  不安定: {df['failures_unstable'].sum()}回")
-    print(f"  角度不正: {df['failures_angle'].sum()}回")
-    print(f"  未接触: {df['failures_no_contact'].sum()}回")
-    print(f"  不正初期位置: {df['failures_invalid_pos'].sum()}回")
-    
-    # 最高成功率の条件を表示
-    best_condition = df.loc[df['success_rate'].idxmax()]
-    print(f"\n最高成功率の条件:")
-    print(f"  角度: {best_condition['angle']}°")
-    print(f"  相対角度: {best_condition['relative_angle']}°")
-    print(f"  リリース位置: X={best_condition['release_x_offset']}, Y={best_condition['release_y_offset']}")
-    print(f"  成功率: {best_condition['success_rate']:.1f}%")
-    print(f"  平均短冊接触: {best_condition['avg_short_contacts']:.2f}回")
-    
+    # ここから先は結果表示用（読み込み直して表示）
     csv_filepath = os.path.join(OUTPUT_DIR, "simulation_results_parallel.csv")
-    df.to_csv(csv_filepath, index=False, float_format='%.3f')
-    print(f"\n詳細結果を '{csv_filepath}' に保存しました。")
-    
-    # ヒートマップの生成
-    if LIBRARIES_INSTALLED:
-        print("\nヒートマップを生成中...")
-        generate_heatmaps(df)
-        print("ヒートマップの生成が完了しました。")
+    if os.path.exists(csv_filepath):
+        df = pd.read_csv(csv_filepath)
+        
+        # 結果の概要を表示
+        print(f"\n=== 高速BATCH実行結果概要 ===")
+        print(f"総パラメータ条件数: {len(df)}")
+        print(f"各条件の試行回数: {NUM_TRIALS_PER_CONDITION} (推定)")
+        print(f"")
+        print(f"全体成功率: {df['success_rate'].mean():.1f}% (範囲: {df['success_rate'].min():.1f}%-{df['success_rate'].max():.1f}%)")
+        print(f"平均短冊接触回数: {df['avg_short_contacts'].mean():.2f}回")
+        print(f"最大短冊接触回数: {df['max_short_contacts'].max():.0f}回")
+        
+        # ヒートマップの生成
+        if LIBRARIES_INSTALLED:
+            print("\nヒートマップを生成中...")
+            generate_heatmaps(df)
+            print("ヒートマップの生成が完了しました。")
+    else:
+        print("結果ファイルが生成されませんでした。")
+
+    return # 元の関数の残りをスキップ
+
+# 以下は元の関数の残骸ですが、上のreturnで終了するため実行されません
+# 既存コードとの整合性を保つため、完全に置き換える形にします
+def _unused_legacy_code():
+    pass
+
 
 
 def run_batch_mode():
