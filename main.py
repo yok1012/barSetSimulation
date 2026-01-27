@@ -22,9 +22,12 @@ try:
     import multiprocessing as mp
     from multiprocessing import Pool, cpu_count
     import time
+    import psutil  # メモリ監視用
     PARALLEL_AVAILABLE = True
+    PSUTIL_AVAILABLE = True
 except ImportError:
     PARALLEL_AVAILABLE = False
+    PSUTIL_AVAILABLE = False
 
 # --- モード設定 ---
 # "INTERACTIVE": リアルタイムで条件変更・結果確認ができるモード
@@ -34,7 +37,7 @@ except ImportError:
 MODE = "BATCH_PARALLEL"
 
 # --- 出力フォルダ ---
-OUTPUT_DIR = "results_err12"
+OUTPUT_DIR = "results_err13"
 JP_FONT_FILENAME = "ipaexg.ttf"
 
 # --- シミュレーション基本設定 ---
@@ -52,17 +55,17 @@ SIMULATION_DURATION = 4.0
 ENABLE_FLOOR_FAIL_VALIDATION = True
 
 # --- 判定閾値設定 ---
-CONTACT_COUNT_THRESHOLD = 2      # 短冊方向の接触回数閾値（これ以上でNG判定対象）
+CONTACT_COUNT_THRESHOLD = 5   # 短冊方向の接触回数閾値（これ以上でNG判定対象）
 CONTACT_DIFF_THRESHOLD = 1.0     # 接触位置の累積差分閾値（μm）（これを超えたらNG）
 
 # --- 各モード用の設定 ---
-BATCH_PARAM_RANGES = {'angle': range(20, 21, 1), 'release_x_offset': range(-600, 300, 10),
-                      'release_y_offset': range(200, 1000, 10), 'relative_angle': [0]}  # 相対角度は固定
+BATCH_PARAM_RANGES = {'angle': range(20, 31, 10), 'release_x_offset': range(-300, 300, 5),
+                      'release_y_offset': range(400, 1000, 5), 'relative_angle': [0]}  # 相対角度は固定
 # バラツキ設定：X, Y位置、相対角度の標準偏差（1 pixel = 1 μm）
 RELEASE_X_VARIABILITY = 0  # X位置のバラツキ 20μm
 RELEASE_Y_VARIABILITY = 0  # Y位置のバラツキ 20μm
-RELATIVE_ANGLE_VARIABILITY = 5.0  # 相対角度のバラツキ（度）
-NUM_TRIALS_PER_CONDITION = 30  # 各条件での試行回数
+RELATIVE_ANGLE_VARIABILITY = 0.0  # 相対角度のバラツキ（度）
+NUM_TRIALS_PER_CONDITION = 10  # 各条件での試行回数
 SINGLE_CONDITION_PARAMS = {'angle': 30, 'release_x_offset': 0, 'release_y_offset': 600, 'relative_angle': 0}
 
 # --- 衝突判定用の種別ID ---
@@ -1268,7 +1271,11 @@ def run_single_condition_parallel(params_data):
             
             if is_success:
                 successful_runs_data.append({'pos': bar.body.position, 'angle': bar.body.angle})
-                
+
+            # メモリリーク防止: pymunkオブジェクトの明示的な解放
+            space.remove(bar, bar.body)
+            del bar, space
+
         except Exception as e:
             trial_results.append({
                 'trial': trial_num,
@@ -1279,7 +1286,11 @@ def run_single_condition_parallel(params_data):
                 'y_offset': 0,
                 'angle_offset': 0
             })
-    
+
+    # ガベージコレクション強制実行
+    import gc
+    gc.collect()
+
     return current_params, successful_runs_data, trial_results
 
 
@@ -1298,11 +1309,13 @@ def run_batch_mode_parallel():
         return run_batch_mode()
     
     print("=== 高速並列処理モードを開始します ===")
-    
+
     # CPU数を取得
     cpu_cores = cpu_count()
     max_workers = min(cpu_cores, 64)  # AWS大型インスタンス用に64プロセスまで対応
+    save_interval = 10  # 10タスクごとに保存（メモリ節約のため頻繁に保存）
     print(f"利用可能CPU数: {cpu_cores}, 使用プロセス数: {max_workers}")
+    print(f"中間保存間隔: {save_interval}タスクごと")
     
     param_names = list(BATCH_PARAM_RANGES.keys())
     param_combinations = list(itertools.product(*BATCH_PARAM_RANGES.values()))
@@ -1420,19 +1433,31 @@ def run_batch_mode_parallel():
                 result = async_result.get(timeout=120)  # 2分のタイムアウト
                 all_results.append(result)
                 completed_tasks += 1
-                
-                # 中間保存（5タスクごと）
-                if completed_tasks % 5 == 0:
+
+                # 中間保存＋メモリ解放
+                if completed_tasks % save_interval == 0:
                     save_current_results(all_results)
-                
+                    # CSVに保存済みなので、メモリからクリア
+                    all_results.clear()
+                    import gc
+                    gc.collect()  # ガベージコレクション強制実行
+
                 # 進捗表示
                 progress = (completed_tasks / len(async_results)) * 100
                 elapsed = time.time() - start_time
                 estimated_total = elapsed / (completed_tasks / len(async_results))
                 remaining = estimated_total - elapsed
-                
+
+                # メモリ使用量の表示
+                mem_info = ""
+                if PSUTIL_AVAILABLE:
+                    mem = psutil.virtual_memory()
+                    mem_used_gb = mem.used / (1024**3)
+                    mem_percent = mem.percent
+                    mem_info = f" | メモリ: {mem_used_gb:.1f}GB ({mem_percent:.1f}%)"
+
                 print(f"\r進捗: {completed_tasks}/{len(async_results)} ({progress:.1f}%) "
-                      f"経過時間: {elapsed:.1f}s 残り時間: {remaining:.1f}s", end="", flush=True)
+                      f"経過時間: {elapsed:.1f}s 残り時間: {remaining:.1f}s{mem_info}", end="", flush=True)
                 
             except Exception as e:
                 print(f"\nタスク {i+1} でエラーが発生しました: {e}")
@@ -1441,9 +1466,15 @@ def run_batch_mode_parallel():
     
     print(f"\n\n=== 並列処理完了 ===")
     print(f"総実行時間: {time.time() - start_time:.1f}秒")
-    
-    # 最終結果の保存
-    save_current_results(all_results)
+
+    # 最終結果の保存（残りがある場合のみ）
+    if all_results:
+        save_current_results(all_results)
+        all_results.clear()
+
+    # メモリ解放
+    import gc
+    gc.collect()
     
     # ここから先は結果表示用（読み込み直して表示）
     csv_filepath = os.path.join(OUTPUT_DIR, "simulation_results_parallel.csv")
