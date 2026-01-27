@@ -22,23 +22,26 @@ try:
     import multiprocessing as mp
     from multiprocessing import Pool, cpu_count
     import time
+    import psutil  # メモリ監視用
     PARALLEL_AVAILABLE = True
+    PSUTIL_AVAILABLE = True
 except ImportError:
     PARALLEL_AVAILABLE = False
+    PSUTIL_AVAILABLE = False
 
 # --- モード設定 ---
 # "INTERACTIVE": リアルタイムで条件変更・結果確認ができるモード
 # "BATCH":       複数条件を自動で試行し、結果をファイル出力するモード
 # "SINGLE":      単一条件の初期/最終状態を画像出力するモード
 # "BATCH_PARALLEL" 並列処理
-MODE = "INTERACTIVE"
+MODE = "BATCH_PARALLEL"
 
 # --- 出力フォルダ ---
-OUTPUT_DIR = "results_err8"
+OUTPUT_DIR = "results_err13"
 JP_FONT_FILENAME = "ipaexg.ttf"
 
 # --- シミュレーション基本設定 ---
-BAR_FRICTION = 1.2
+BAR_FRICTION = 1.5
 BAR_ELASTICITY = 0.6
 WALL_FRICTION = 1.2
 WALL_ELASTICITY = 0.6
@@ -51,14 +54,18 @@ PPM = 1000000.0         # 1,000,000 pixels/m = 1 pixel/μm
 SIMULATION_DURATION = 4.0
 ENABLE_FLOOR_FAIL_VALIDATION = True
 
+# --- 判定閾値設定 ---
+CONTACT_COUNT_THRESHOLD = 5   # 短冊方向の接触回数閾値（これ以上でNG判定対象）
+CONTACT_DIFF_THRESHOLD = 1.0     # 接触位置の累積差分閾値（μm）（これを超えたらNG）
+
 # --- 各モード用の設定 ---
-BATCH_PARAM_RANGES = {'angle': range(20, 21, 1), 'release_x_offset': range(-600, 300, 10),
-                      'release_y_offset': range(200, 1000, 10), 'relative_angle': [0]}  # 相対角度は固定
+BATCH_PARAM_RANGES = {'angle': range(20, 31, 10), 'release_x_offset': range(-300, 300, 5),
+                      'release_y_offset': range(400, 1000, 5), 'relative_angle': [0]}  # 相対角度は固定
 # バラツキ設定：X, Y位置、相対角度の標準偏差（1 pixel = 1 μm）
-RELEASE_X_VARIABILITY = 20  # X位置のバラツキ 20μm
-RELEASE_Y_VARIABILITY = 20  # Y位置のバラツキ 20μm
-RELATIVE_ANGLE_VARIABILITY = 1.0  # 相対角度のバラツキ（度）
-NUM_TRIALS_PER_CONDITION = 30  # 各条件での試行回数
+RELEASE_X_VARIABILITY = 0  # X位置のバラツキ 20μm
+RELEASE_Y_VARIABILITY = 0  # Y位置のバラツキ 20μm
+RELATIVE_ANGLE_VARIABILITY = 0.0  # 相対角度のバラツキ（度）
+NUM_TRIALS_PER_CONDITION = 10  # 各条件での試行回数
 SINGLE_CONDITION_PARAMS = {'angle': 30, 'release_x_offset': 0, 'release_y_offset': 600, 'relative_angle': 0}
 
 # --- 衝突判定用の種別ID ---
@@ -155,7 +162,7 @@ def check_success(bar_shape, slope_segment, wall_segment, slope_angle_rad, floor
     
     if slope_segment is None or wall_segment is None: return False, "ステージ未定義"
 
-    touching_slope, touching_wall = False, False
+    touching_slope = False
 
     # 別の方法で接触判定を行う - space.shape_queryを使用
     space = bar_shape.space
@@ -165,7 +172,6 @@ def check_success(bar_shape, slope_segment, wall_segment, slope_angle_rad, floor
         for contact_info in contacts:
             other_shape = contact_info.shape
             if other_shape == slope_segment: touching_slope = True
-            if other_shape == wall_segment: touching_wall = True
 
     # 未接触判定を緩和：斜面接触のみで成功とする
     if not touching_slope: return False, "未接触"
@@ -341,6 +347,7 @@ def run_interactive_mode():
     wall_hit_position = None  # 壁面接触時のバーの位置
     wall_hit_angle = None  # 壁面接触時のバーの角度
     short_side_contact_count = 0  # 短冊方向の接触回数
+    accumulated_contact_diff = 0.0 # 接触位置の累積差分
     multiple_contact_alert_timer = 0  # 複数回接触アラートの表示タイマー
     contact_history = []  # 接触履歴を記録
 
@@ -359,12 +366,10 @@ def run_interactive_mode():
     handler.data["hit_angle"] = None
     
     def wall_contact_handler(arbiter, space, data):
-        nonlocal short_side_contact_count, contact_history
+        nonlocal short_side_contact_count, contact_history, accumulated_contact_diff
         
         # バーがまだ安定していない場合のみチェック
         if not bar_is_settled and dynamic_bars:
-            current_time = pygame.time.get_ticks()
-            
             # 接触点を取得
             contact_points = arbiter.contact_point_set.points
             if contact_points:
@@ -375,37 +380,31 @@ def run_interactive_mode():
                 
                 # 短冊方向の接触を処理（"short_side" または "both"）
                 if contact_side in ["short_side", "both"]:
-                    # 過去の接触と重複していないかチェック
-                    is_new_contact = True
-                    for prev_time, prev_point in contact_history:
-                        # 2秒以内かつ5ピクセル以内の接触は重複とみなす
-                        time_diff = current_time - prev_time
-                        if time_diff < 2000:  # 2秒以内
-                            point_dist = math.sqrt((contact_point[0] - prev_point[0])**2 + (contact_point[1] - prev_point[1])**2)
-                            if point_dist < 10:  # 5ピクセル以内
-                                is_new_contact = False
-                                break
+                    # 以前の接触点との距離を計算
+                    diff = 0.0
+                    if contact_history:
+                        last_time, last_point = contact_history[-1]
+                        diff = math.sqrt((contact_point[0] - last_point[0])**2 + (contact_point[1] - last_point[1])**2)
                     
-                    # 新しい接触の場合のみカウント
-                    if is_new_contact:
-                        short_side_contact_count += 1
-                        contact_history.append((current_time, contact_point))
-                        
-                        # デバッグ情報を追加
-                        print(f"短冊接触検出: {contact_side}, 回数: {short_side_contact_count}, 位置: ({contact_point[0]:.1f}, {contact_point[1]:.1f})")
-                        
-                        # 古い履歴を削除（5秒以上前）
-                        contact_history = [(t, p) for t, p in contact_history if current_time - t < 5000]
-                        
-                        data["contact_count"] = short_side_contact_count
-                        
-                        # 2回以上の短冊方向接触でアラート
-                        if short_side_contact_count >= 2:
-                            data["hit_flag"][0] = True
-                            data["hit_position"] = dynamic_bars[0].body.position.x, dynamic_bars[0].body.position.y
-                            data["hit_angle"] = dynamic_bars[0].body.angle
-                            data["contact_side"] = "multiple_short_side"
-                            data["contact_point"] = contact_point
+                    # 差分を積算
+                    accumulated_contact_diff += diff
+                    
+                    # カウントと履歴を更新
+                    short_side_contact_count += 1
+                    contact_history.append((pygame.time.get_ticks(), contact_point))
+                    
+                    # デバッグ情報を追加
+                    print(f"短冊接触検出: {contact_side}, 回数: {short_side_contact_count}, 位置: ({contact_point[0]:.1f}, {contact_point[1]:.1f}), 差分: {diff:.3f}, 累積: {accumulated_contact_diff:.3f}")
+                    
+                    data["contact_count"] = short_side_contact_count
+                    
+                    # 2回以上の短冊方向接触 かつ 累積差分が閾値を超えたらNG
+                    if short_side_contact_count >= CONTACT_COUNT_THRESHOLD and accumulated_contact_diff > CONTACT_DIFF_THRESHOLD:
+                        data["hit_flag"][0] = True
+                        data["hit_position"] = dynamic_bars[0].body.position.x, dynamic_bars[0].body.position.y
+                        data["hit_angle"] = dynamic_bars[0].body.angle
+                        data["contact_side"] = "multiple_short_side"
+                        data["contact_point"] = contact_point
         return True
     
     wall_handler = space.add_collision_handler(BAR_COLLISION_TYPE, WALL_COLLISION_TYPE);
@@ -425,7 +424,7 @@ def run_interactive_mode():
     def reset_simulation(full_reset=True, check_pos=True):
         nonlocal last_result, settle_frames_count, bar_is_settled, static_shapes, initial_pos_ok, last_diff
         nonlocal floor_hit_alert_timer, floor_hit_position, floor_hit_angle
-        nonlocal short_side_contact_count, multiple_contact_alert_timer, contact_history
+        nonlocal short_side_contact_count, accumulated_contact_diff, multiple_contact_alert_timer, contact_history
         stage_angle_rad, actual_release_angle_rad = get_release_angles()
         if full_reset:
             for shape in dynamic_bars: space.remove(shape, shape.body)
@@ -453,6 +452,7 @@ def run_interactive_mode():
         wall_handler.data["contact_count"] = 0
         # 接触回数をリセット
         short_side_contact_count = 0
+        accumulated_contact_diff = 0.0
         multiple_contact_alert_timer = 0
         contact_history.clear()
         handler.data["hit_angle"] = None
@@ -794,12 +794,12 @@ def run_interactive_mode():
 
         # ===== UI要素の描画（固定サイズ、スケール変換されない） =====
         # パラメータ表示（左上）
-        param_labels = {"angle": "ステージ角度", "relative_angle": "相対リリース角度", "release_x_offset": "リリース X",
-                        "release_y_offset": "リリース Y"}
+        param_labels = {"angle": ("ステージ角度", "°"), "relative_angle": ("相対リリース角度", "°"), 
+                        "release_x_offset": ("リリース X", "μm"), "release_y_offset": ("リリース Y", "μm")}
         y_offset = 10
-        for p_name, label in param_labels.items():
+        for p_name, (label, unit) in param_labels.items():
             color = (0, 0, 200) if editing_param == p_name else (0, 0, 0)
-            text = f"{label}: {input_buffer if editing_param == p_name else params.get(p_name, 0)}"
+            text = f"{label}: {input_buffer if editing_param == p_name else params.get(p_name, 0)} {unit}"
             if editing_param == p_name and pygame.time.get_ticks() % 1000 < 500: text += "_"
             img = font.render(text, True, color)
             rect = screen.blit(img, (10, y_offset))
@@ -1160,16 +1160,12 @@ def run_single_condition_parallel(params_data):
     
     for trial_num in trial_range:
         try:
-            # Pygame初期化（各プロセスで必要）
-            os.environ['SDL_VIDEODRIVER'] = 'dummy'
-            import pygame
-            pygame.init()
-            
             space = pymunk.Space()
             space.gravity = (0, 981)
             floor_hit_flag = [False]
             wall_hit_flag = [False]
             short_side_contact_count = 0
+            accumulated_contact_diff = 0.0
             contact_history = []
             
             # 衝突ハンドラーは簡単な実装を使用
@@ -1202,48 +1198,50 @@ def run_single_condition_parallel(params_data):
             bar = create_bar(space, (release_pos_x, release_pos_y), trial_release_angle, is_visual=False)
             wall_handler_data["bar_body"] = bar.body
             
+            # 衝突ハンドラーの設定
+            def parallel_wall_handler(arbiter, space, data):
+                nonlocal short_side_contact_count, contact_history, accumulated_contact_diff
+                try:
+                    contact_points = arbiter.contact_point_set.points
+                    if contact_points:
+                        contact_point = contact_points[0].point_a
+                        contact_side = check_bar_contact_side(bar.body, None, contact_point)
+                        
+                        if contact_side in ["short_side", "both"]:
+                            diff = 0.0
+                            if contact_history:
+                                _, last_point = contact_history[-1]
+                                diff = math.sqrt((contact_point[0] - last_point[0])**2 + (contact_point[1] - last_point[1])**2)
+                            
+                            accumulated_contact_diff += diff
+                            short_side_contact_count += 1
+                            contact_history.append((0, contact_point)) # Time is not strictly needed for logic now
+                            
+                            if short_side_contact_count >= CONTACT_COUNT_THRESHOLD and accumulated_contact_diff > CONTACT_DIFF_THRESHOLD:
+                                wall_hit_flag[0] = True
+                except:
+                    pass
+                return True
+
+            def parallel_floor_handler(arbiter, space, data):
+                floor_hit_flag[0] = True
+                return True
+
+            try:
+                wh = space.add_collision_handler(BAR_COLLISION_TYPE, WALL_COLLISION_TYPE)
+                wh.begin = parallel_wall_handler
+                fh = space.add_collision_handler(BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE)
+                fh.begin = parallel_floor_handler
+            except:
+                pass
+
             # シミュレーション実行
             for step in range(int(SIMULATION_DURATION * 60)):
                 space.step(1.0 / 60.0)
                 
-                # 簡易衝突判定
-                if bar.body.position.y >= HEIGHT - 10:  # 床接触の簡易判定
+                # 床接触の簡易判定（ハンドラーが動作しない場合のバックアップ）
+                if bar.body.position.y >= HEIGHT - 10:
                     floor_hit_flag[0] = True
-                
-                # 壁面接触の詳細判定
-                try:
-                    contacts = space.shape_query(bar)
-                    current_time = step * (1000 / 60)  # ミリ秒に変換
-                    
-                    for contact_info in contacts:
-                        if contact_info.shape.collision_type == WALL_COLLISION_TYPE:
-                            # 接触点を取得
-                            contact_point = contact_info.contact_point_set.point if hasattr(contact_info, 'contact_point_set') else bar.body.position
-                            
-                            # 詳細な面判定を使用
-                            contact_side = check_bar_contact_side(bar.body, None, contact_point)
-                            
-                            if contact_side in ["short_side", "both"]:
-                                # 重複チェック
-                                is_new_contact = True
-                                for prev_time, prev_point in contact_history:
-                                    time_diff = current_time - prev_time
-                                    if time_diff < 2000:
-                                        point_dist = math.sqrt((contact_point[0] - prev_point[0])**2 + (contact_point[1] - prev_point[1])**2) if contact_point != bar.body.position else 0
-                                        if point_dist < 5:
-                                            is_new_contact = False
-                                            break
-                                
-                                if is_new_contact:
-                                    short_side_contact_count += 1
-                                    contact_history.append((current_time, contact_point))
-                                    contact_history = [(t, p) for t, p in contact_history if current_time - t < 5000]
-                                    
-                                    if short_side_contact_count >= 2:
-                                        wall_hit_flag[0] = True
-                                        break
-                except:
-                    pass
                 
                 if (floor_hit_flag[0] and ENABLE_FLOOR_FAIL_VALIDATION) or wall_hit_flag[0]:
                     break
@@ -1273,9 +1271,11 @@ def run_single_condition_parallel(params_data):
             
             if is_success:
                 successful_runs_data.append({'pos': bar.body.position, 'angle': bar.body.angle})
-                
-            pygame.quit()
-            
+
+            # メモリリーク防止: pymunkオブジェクトの明示的な解放
+            space.remove(bar, bar.body)
+            del bar, space
+
         except Exception as e:
             trial_results.append({
                 'trial': trial_num,
@@ -1286,7 +1286,11 @@ def run_single_condition_parallel(params_data):
                 'y_offset': 0,
                 'angle_offset': 0
             })
-    
+
+    # ガベージコレクション強制実行
+    import gc
+    gc.collect()
+
     return current_params, successful_runs_data, trial_results
 
 
@@ -1294,6 +1298,8 @@ def run_batch_mode_parallel():
     """
     並列処理版のBATCHモード
     """
+    import traceback
+    
     if not LIBRARIES_INSTALLED:
         print("エラー: BATCHモードに必要なライブラリがありません。")
         return
@@ -1303,11 +1309,13 @@ def run_batch_mode_parallel():
         return run_batch_mode()
     
     print("=== 高速並列処理モードを開始します ===")
-    
+
     # CPU数を取得
     cpu_cores = cpu_count()
-    max_workers = min(cpu_cores, 8)  # 最大8プロセスに制限
+    max_workers = min(cpu_cores, 64)  # AWS大型インスタンス用に64プロセスまで対応
+    save_interval = 10  # 10タスクごとに保存（メモリ節約のため頻繁に保存）
     print(f"利用可能CPU数: {cpu_cores}, 使用プロセス数: {max_workers}")
+    print(f"中間保存間隔: {save_interval}タスクごと")
     
     param_names = list(BATCH_PARAM_RANGES.keys())
     param_combinations = list(itertools.product(*BATCH_PARAM_RANGES.values()))
@@ -1341,6 +1349,76 @@ def run_batch_mode_parallel():
     completed_tasks = 0
     start_time = time.time()
     
+    def save_current_results(current_results_list):
+        if not current_results_list: return
+        
+        # 結果を統合
+        condition_results = {}
+        for params, successful_runs, trial_results in current_results_list:
+            key = tuple(sorted(params.items()))
+            if key not in condition_results:
+                condition_results[key] = {'params': params, 'successful_runs': [], 'trial_results': []}
+            condition_results[key]['successful_runs'].extend(successful_runs)
+            condition_results[key]['trial_results'].extend(trial_results)
+            
+        results_data = []
+        for key, data in condition_results.items():
+            params = data['params']
+            successful_runs = data['successful_runs']
+            trial_results = data['trial_results']
+            
+            # 全ての試行が揃っていない場合でも集計する
+            if not trial_results: continue
+            
+            success_rate = (len(successful_runs) / len(trial_results)) * 100
+            stage_angle_rad = math.radians(-params['angle'])
+            
+            failure_reasons = {}
+            for result in trial_results:
+                if not result['success']:
+                    reason = result['reason']
+                    failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+            
+            short_contact_counts = [result['short_contacts'] for result in trial_results]
+            avg_short_contacts = np.mean(short_contact_counts) if short_contact_counts else 0
+            max_short_contacts = max(short_contact_counts) if short_contact_counts else 0
+            
+            ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
+            avg_final_x = np.mean([run['pos'].x for run in successful_runs]) if successful_runs else None
+            avg_final_y = np.mean([run['pos'].y for run in successful_runs]) if successful_runs else None
+            diff = math.sqrt((ideal_x - avg_final_x) ** 2 + (ideal_y - avg_final_y) ** 2) if avg_final_x is not None else None
+            
+            x_offsets = [result['x_offset'] for result in trial_results]
+            y_offsets = [result['y_offset'] for result in trial_results]
+            angle_offsets = [result['angle_offset'] for result in trial_results]
+            
+            condition_result = {
+                **params,
+                'success_rate': success_rate,
+                'ideal_x': ideal_x, 'ideal_y': ideal_y,
+                'avg_final_x': avg_final_x, 'avg_final_y': avg_final_y,
+                'difference_from_ideal_px': diff,
+                'avg_short_contacts': avg_short_contacts,
+                'max_short_contacts': max_short_contacts,
+                'failures_floor': failure_reasons.get('floor_contact', 0),
+                'failures_multi_short': failure_reasons.get('multiple_short_contacts', 0),
+                'failures_unstable': failure_reasons.get('不安定', 0),
+                'failures_angle': failure_reasons.get('角度不正', 0),
+                'failures_no_contact': failure_reasons.get('未接触', 0),
+                'failures_invalid_pos': failure_reasons.get('invalid_initial_position', 0),
+                'x_offset_std': np.std(x_offsets),
+                'y_offset_std': np.std(y_offsets),
+                'angle_offset_std': np.std(angle_offsets)
+            }
+            results_data.append(condition_result)
+            
+        if results_data:
+            df = pd.DataFrame(results_data)
+            if 'difference_from_ideal_px' in df.columns:
+                df['difference_from_ideal_mm'] = df['difference_from_ideal_px'] / PPM
+            csv_filepath = os.path.join(OUTPUT_DIR, "simulation_results_parallel.csv")
+            df.to_csv(csv_filepath, index=False, float_format='%.3f')
+
     # 並列処理実行
     with Pool(processes=max_workers) as pool:
         # 非同期でタスクを投入
@@ -1355,142 +1433,78 @@ def run_batch_mode_parallel():
                 result = async_result.get(timeout=120)  # 2分のタイムアウト
                 all_results.append(result)
                 completed_tasks += 1
-                
+
+                # 中間保存＋メモリ解放
+                if completed_tasks % save_interval == 0:
+                    save_current_results(all_results)
+                    # CSVに保存済みなので、メモリからクリア
+                    all_results.clear()
+                    import gc
+                    gc.collect()  # ガベージコレクション強制実行
+
                 # 進捗表示
                 progress = (completed_tasks / len(async_results)) * 100
                 elapsed = time.time() - start_time
                 estimated_total = elapsed / (completed_tasks / len(async_results))
                 remaining = estimated_total - elapsed
-                
+
+                # メモリ使用量の表示
+                mem_info = ""
+                if PSUTIL_AVAILABLE:
+                    mem = psutil.virtual_memory()
+                    mem_used_gb = mem.used / (1024**3)
+                    mem_percent = mem.percent
+                    mem_info = f" | メモリ: {mem_used_gb:.1f}GB ({mem_percent:.1f}%)"
+
                 print(f"\r進捗: {completed_tasks}/{len(async_results)} ({progress:.1f}%) "
-                      f"経過時間: {elapsed:.1f}s 残り時間: {remaining:.1f}s", end="", flush=True)
+                      f"経過時間: {elapsed:.1f}s 残り時間: {remaining:.1f}s{mem_info}", end="", flush=True)
                 
             except Exception as e:
                 print(f"\nタスク {i+1} でエラーが発生しました: {e}")
+                traceback.print_exc()
                 completed_tasks += 1
     
     print(f"\n\n=== 並列処理完了 ===")
     print(f"総実行時間: {time.time() - start_time:.1f}秒")
+
+    # 最終結果の保存（残りがある場合のみ）
+    if all_results:
+        save_current_results(all_results)
+        all_results.clear()
+
+    # メモリ解放
+    import gc
+    gc.collect()
     
-    # 結果を統合
-    print("結果を統合中...")
-    condition_results = {}
-    
-    for params, successful_runs, trial_results in all_results:
-        # パラメータをキーとして結果を統合
-        key = tuple(sorted(params.items()))
-        
-        if key not in condition_results:
-            condition_results[key] = {
-                'params': params,
-                'successful_runs': [],
-                'trial_results': []
-            }
-        
-        condition_results[key]['successful_runs'].extend(successful_runs)
-        condition_results[key]['trial_results'].extend(trial_results)
-    
-    # 最終的な結果データを作成
-    results_data = []
-    
-    for key, data in condition_results.items():
-        params = data['params']
-        successful_runs = data['successful_runs']
-        trial_results = data['trial_results']
-        
-        success_rate = (len(successful_runs) / len(trial_results)) * 100 if trial_results else 0
-        
-        # 統計計算
-        stage_angle_rad = math.radians(-params['angle'])
-        
-        # 失敗理由の集計
-        failure_reasons = {}
-        for result in trial_results:
-            if not result['success']:
-                reason = result['reason']
-                failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
-        
-        # 短冊方向接触の統計
-        short_contact_counts = [result['short_contacts'] for result in trial_results]
-        avg_short_contacts = np.mean(short_contact_counts) if short_contact_counts else 0
-        max_short_contacts = max(short_contact_counts) if short_contact_counts else 0
-        
-        ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
-        avg_final_x = np.mean([run['pos'].x for run in successful_runs]) if successful_runs else None
-        avg_final_y = np.mean([run['pos'].y for run in successful_runs]) if successful_runs else None
-        diff = math.sqrt((ideal_x - avg_final_x) ** 2 + (ideal_y - avg_final_y) ** 2) if avg_final_x is not None else None
-        
-        # バラツキの統計
-        x_offsets = [result['x_offset'] for result in trial_results]
-        y_offsets = [result['y_offset'] for result in trial_results]
-        angle_offsets = [result['angle_offset'] for result in trial_results]
-        
-        condition_result = {
-            **params,
-            'success_rate': success_rate,
-            'ideal_x': ideal_x, 'ideal_y': ideal_y,
-            'avg_final_x': avg_final_x, 'avg_final_y': avg_final_y,
-            'difference_from_ideal_px': diff,
-            'avg_short_contacts': avg_short_contacts,
-            'max_short_contacts': max_short_contacts,
-            'failures_floor': failure_reasons.get('floor_contact', 0),
-            'failures_multi_short': failure_reasons.get('multiple_short_contacts', 0),
-            'failures_unstable': failure_reasons.get('不安定', 0),
-            'failures_angle': failure_reasons.get('角度不正', 0),
-            'failures_no_contact': failure_reasons.get('未接触', 0),
-            'failures_invalid_pos': failure_reasons.get('invalid_initial_position', 0),
-            'x_offset_std': np.std(x_offsets),
-            'y_offset_std': np.std(y_offsets),
-            'angle_offset_std': np.std(angle_offsets)
-        }
-        
-        results_data.append(condition_result)
-    
-    # 結果を表示・保存（通常のBATCHモードと同じ）
-    if not results_data:
-        print("試行結果がありません。")
-        return
-    
-    df = pd.DataFrame(results_data)
-    if 'difference_from_ideal_px' in df.columns:
-        df['difference_from_ideal_mm'] = df['difference_from_ideal_px'] / PPM
-    
-    # 結果の概要を表示
-    print(f"\n=== 高速BATCH実行結果概要 ===")
-    print(f"総パラメータ条件数: {len(df)}")
-    print(f"各条件の試行回数: {NUM_TRIALS_PER_CONDITION}")
-    print(f"総試行回数: {len(df) * NUM_TRIALS_PER_CONDITION}")
-    print(f"")
-    print(f"全体成功率: {df['success_rate'].mean():.1f}% (範囲: {df['success_rate'].min():.1f}%-{df['success_rate'].max():.1f}%)")
-    print(f"平均短冊接触回数: {df['avg_short_contacts'].mean():.2f}回")
-    print(f"最大短冊接触回数: {df['max_short_contacts'].max():.0f}回")
-    print(f"")
-    print(f"失敗原因別統計:")
-    print(f"  床接触: {df['failures_floor'].sum()}回")
-    print(f"  複数短冊接触: {df['failures_multi_short'].sum()}回")
-    print(f"  不安定: {df['failures_unstable'].sum()}回")
-    print(f"  角度不正: {df['failures_angle'].sum()}回")
-    print(f"  未接触: {df['failures_no_contact'].sum()}回")
-    print(f"  不正初期位置: {df['failures_invalid_pos'].sum()}回")
-    
-    # 最高成功率の条件を表示
-    best_condition = df.loc[df['success_rate'].idxmax()]
-    print(f"\n最高成功率の条件:")
-    print(f"  角度: {best_condition['angle']}°")
-    print(f"  相対角度: {best_condition['relative_angle']}°")
-    print(f"  リリース位置: X={best_condition['release_x_offset']}, Y={best_condition['release_y_offset']}")
-    print(f"  成功率: {best_condition['success_rate']:.1f}%")
-    print(f"  平均短冊接触: {best_condition['avg_short_contacts']:.2f}回")
-    
+    # ここから先は結果表示用（読み込み直して表示）
     csv_filepath = os.path.join(OUTPUT_DIR, "simulation_results_parallel.csv")
-    df.to_csv(csv_filepath, index=False, float_format='%.3f')
-    print(f"\n詳細結果を '{csv_filepath}' に保存しました。")
-    
-    # ヒートマップの生成
-    if LIBRARIES_INSTALLED:
-        print("\nヒートマップを生成中...")
-        generate_heatmaps(df)
-        print("ヒートマップの生成が完了しました。")
+    if os.path.exists(csv_filepath):
+        df = pd.read_csv(csv_filepath)
+        
+        # 結果の概要を表示
+        print(f"\n=== 高速BATCH実行結果概要 ===")
+        print(f"総パラメータ条件数: {len(df)}")
+        print(f"各条件の試行回数: {NUM_TRIALS_PER_CONDITION} (推定)")
+        print(f"")
+        print(f"全体成功率: {df['success_rate'].mean():.1f}% (範囲: {df['success_rate'].min():.1f}%-{df['success_rate'].max():.1f}%)")
+        print(f"平均短冊接触回数: {df['avg_short_contacts'].mean():.2f}回")
+        print(f"最大短冊接触回数: {df['max_short_contacts'].max():.0f}回")
+        
+        # ヒートマップの生成
+        if LIBRARIES_INSTALLED:
+            print("\nヒートマップを生成中...")
+            generate_heatmaps(df)
+            print("ヒートマップの生成が完了しました。")
+    else:
+        print("結果ファイルが生成されませんでした。")
+
+    return # 元の関数の残りをスキップ
+
+# 以下は元の関数の残骸ですが、上のreturnで終了するため実行されません
+# 既存コードとの整合性を保つため、完全に置き換える形にします
+def _unused_legacy_code():
+    pass
+
 
 
 def run_batch_mode():
@@ -1522,6 +1536,7 @@ def run_batch_mode():
             floor_hit_flag = [False]
             wall_hit_flag = [False]
             short_side_contact_count = 0
+            accumulated_contact_diff = 0.0
             contact_history = []
 
             def floor_contact_handler(arbiter, space, data):
@@ -1564,7 +1579,7 @@ def run_batch_mode():
                 return True
                 
             def collision_handler_wall(arbiter, space, data):
-                nonlocal short_side_contact_count, contact_history
+                nonlocal short_side_contact_count, contact_history, accumulated_contact_diff
                 current_time = pygame.time.get_ticks()
                 
                 try:
@@ -1573,23 +1588,21 @@ def run_batch_mode():
                         contact_point = contact_points[0].point_a
                         contact_side = check_bar_contact_side(wall_handler_data["bar_body"], None, contact_point)
                         
-                        if contact_side == "short_side":
-                            is_new_contact = True
-                            for prev_time, prev_point in contact_history:
-                                time_diff = current_time - prev_time
-                                if time_diff < 1000:
-                                    point_dist = math.sqrt((contact_point[0] - prev_point[0])**2 + (contact_point[1] - prev_point[1])**2)
-                                    if point_dist < 30:
-                                        is_new_contact = False
-                                        break
+                        if contact_side in ["short_side", "both"]:
+                            # 以前の接触点との距離を計算
+                            diff = 0.0
+                            if contact_history:
+                                last_time, last_point = contact_history[-1]
+                                diff = math.sqrt((contact_point[0] - last_point[0])**2 + (contact_point[1] - last_point[1])**2)
                             
-                            if is_new_contact:
-                                short_side_contact_count += 1
-                                contact_history.append((current_time, contact_point))
-                                contact_history = [(t, p) for t, p in contact_history if current_time - t < 5000]
-                                
-                                if short_side_contact_count >= 2:
-                                    wall_hit_flag[0] = True
+                            # 差分を積算
+                            accumulated_contact_diff += diff
+                            
+                            short_side_contact_count += 1
+                            contact_history.append((current_time, contact_point))
+                            
+                            if short_side_contact_count >= CONTACT_COUNT_THRESHOLD and accumulated_contact_diff > CONTACT_DIFF_THRESHOLD:
+                                wall_hit_flag[0] = True
                 except:
                     # 衝突点情報が取得できない場合はスキップ
                     pass
@@ -1666,7 +1679,7 @@ def run_batch_mode():
                                 bar_angle = bar.body.angle
                                 if abs(math.sin(bar_angle)) > 0.7:  # バーが垂直に近い場合
                                     short_side_contact_count += 1
-                                    if short_side_contact_count >= 2:
+                                    if short_side_contact_count >= CONTACT_COUNT_THRESHOLD:
                                         wall_hit_flag[0] = True
                                         break
                     except:
