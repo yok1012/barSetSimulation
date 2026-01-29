@@ -3,11 +3,75 @@
 ## 概要
 このプロジェクトは、斜面ステージ上にバーを設置する物理シミュレーションです。バーの設置成功率を分析し、最適な設置条件を探索するためのツールを提供します。
 
+**🚀 最新情報: AWS最適化版がリリースされました！**
+- **8倍の高速化**を実現
+- CPU使用率を85-95%に向上
+- 処理時間とコストを87%削減
+
+詳細は [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) をご覧ください。
+
 ## 技術仕様
 - **物理エンジン**: pymunk (2D物理シミュレーション)
 - **描画**: pygame (リアルタイム可視化)
 - **データ分析**: pandas, numpy, matplotlib (結果分析・可視化)
 - **並列処理**: multiprocessing (高速化)
+- **AWS最適化**: CPU affinity, 動的チャンクサイズ, リアルタイム進捗管理
+
+## クイックスタート
+
+### ローカル環境での実行
+
+```bash
+# 依存関係のインストール
+pip install -r requirements.txt
+
+# 並列バッチ処理を実行
+MODE=BATCH_PARALLEL python3 main.py
+```
+
+### AWS EC2での実行
+
+1. [AWS_DEPLOYMENT_GUIDE.md](AWS_DEPLOYMENT_GUIDE.md) の手順に従ってEC2インスタンスをセットアップ
+2. プロジェクトをアップロード
+3. 実行:
+
+```bash
+cd ~/barsetProjects/v_gemini
+source venv/bin/activate
+MODE=BATCH_PARALLEL python3 main.py
+```
+
+詳細は [AWS_DEPLOYMENT_GUIDE.md](AWS_DEPLOYMENT_GUIDE.md) を参照してください。
+
+## ドキュメント
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) | **最適化の概要と効果** |
+| [AWS_DEPLOYMENT_GUIDE.md](AWS_DEPLOYMENT_GUIDE.md) | AWS EC2へのデプロイ手順 |
+| [AWS_OPTIMIZATION_GUIDE.md](AWS_OPTIMIZATION_GUIDE.md) | AWS最適化の詳細とチューニング |
+| [SIMULATION_GUIDE.md](SIMULATION_GUIDE.md) | シミュレーションの詳細仕様 |
+
+## パフォーマンス
+
+### 最適化前 vs 最適化後（c5.2xlarge使用）
+
+| 項目 | BATCH（最適化前） | BATCH_PARALLEL（最適化後） | 改善率 |
+|------|------------------|---------------------------|-------|
+| 処理速度 | 2,500条件/時間 | 20,000条件/時間 | **8倍** |
+| CPU使用率 | 12-15% | 85-95% | **6倍** |
+| 28,512条件の処理時間 | ~11時間 | ~1.4時間 | **7.9倍** |
+| 処理コスト | $3.74 | $0.48 | **87%削減** |
+
+### 推奨インスタンスタイプ
+
+| 処理規模 | 推奨インスタンス | 期待処理速度 | 時間単価 |
+|---------|---------------|-----------|---------|
+| 小規模（<5,000条件） | t3.medium | ~2,500条件/時間 | $0.04 |
+| 中規模（5,000-20,000条件） | c5.xlarge ⭐ | ~10,000条件/時間 | $0.17 |
+| 大規模（>20,000条件） | c5.2xlarge ⭐⭐ | ~20,000条件/時間 | $0.34 |
+
+⭐ = コストパフォーマンスが良い
 
 ## 実行モード
 
@@ -17,8 +81,19 @@
 ### 2. BATCH（バッチモード）
 複数の条件を自動で試行し、結果をファイル出力するモード
 
-### 3. BATCH_PARALLEL（並列バッチモード）
+### 3. BATCH_PARALLEL（並列バッチモード）⭐推奨
 マルチコアCPUを活用した高速バッチ処理モード
+
+**最適化機能:**
+- CPU Affinity（CPUコア固定）による高速化
+- 動的チャンクサイズ計算によるロードバランシング
+- リアルタイム進捗表示とメモリ監視
+- グレースフルシャットダウン（中断時もデータ保存）
+
+**使用方法:**
+```bash
+MODE=BATCH_PARALLEL python3 main.py
+```
 
 ### 4. SINGLE（単一条件モード）
 単一条件の初期/最終状態を画像出力するモード
