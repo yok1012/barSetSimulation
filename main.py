@@ -112,13 +112,9 @@ OUTPUT_DIR = 'results'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def init_worker(worker_id, total_workers):
+def init_worker():
     """
     ワーカープロセスの初期化（AWS最適化）
-    
-    Args:
-        worker_id: ワーカーID
-        total_workers: 総ワーカー数
     """
     # シグナルハンドラをデフォルトに設定（親プロセスから継承しない）
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -128,8 +124,10 @@ def init_worker(worker_id, total_workers):
         try:
             p = psutil.Process()
             cpu_count = psutil.cpu_count(logical=True)
-            # ワーカーIDに基づいて特定のCPUコアに割り当て
-            cpu_id = worker_id % cpu_count
+            # プロセスIDに基づいて特定のCPUコアに割り当て
+            # multiprocessing.current_process()._identity[0]は1から始まるワーカー番号
+            worker_num = mp.current_process()._identity[0] if mp.current_process()._identity else 0
+            cpu_id = worker_num % cpu_count
             p.cpu_affinity([cpu_id])
         except Exception as e:
             # CPU affinity設定失敗は警告のみ（動作は継続）
@@ -225,13 +223,13 @@ class BarSimulation:
         self.space.add(wall_body, wall_shape)
         
         # 床（失敗判定用）
-        floor_body = pymunk.Body(body_type=pymunk.Body.STATIC)
-        floor_shape = pymunk.Segment(floor_body,
+        self.floor_body = pymunk.Body(body_type=pymunk.Body.STATIC)
+        floor_shape = pymunk.Segment(self.floor_body,
                                      (0, SCREEN_HEIGHT),
                                      (SCREEN_WIDTH, SCREEN_HEIGHT),
                                      5)
         floor_shape.collision_type = 1  # 床用コリジョンタイプ
-        self.space.add(floor_body, floor_shape)
+        self.space.add(self.floor_body, floor_shape)
         
         self.stage_angle_rad = angle_rad
         self.stage_end_x = stage_end_x
@@ -307,10 +305,12 @@ class BarSimulation:
             
     def _check_floor_contact(self):
         """床接触チェック"""
-        for contact in self.bar_shape.shapes_collide(self.space.shapes[2]):
-            if contact.points:
-                self.floor_contact = True
-                break
+        # 床との接触を確認
+        for arbiter in self.space.arbiters:
+            for shape in arbiter.shapes:
+                if shape.body == self.floor_body:
+                    self.floor_contact = True
+                    return
                 
     def _draw(self):
         """描画"""
@@ -528,10 +528,7 @@ def run_batch_parallel():
     
     try:
         # ワーカー初期化関数を設定
-        initializer = partial(init_worker, total_workers=num_workers)
-        
-        with mp.Pool(processes=num_workers, initializer=initializer,
-                     initargs=range(num_workers)) as pool:
+        with mp.Pool(processes=num_workers, initializer=init_worker) as pool:
             # imap_unorderedを使用して順次結果を取得（メモリ効率的）
             for i, result in enumerate(pool.imap_unordered(
                     run_condition_batch, 
@@ -566,8 +563,8 @@ def run_batch_parallel():
                     
     except KeyboardInterrupt:
         print("\n\n中断されました。処理済みの結果を保存します...")
-        pool.terminate()
-        pool.join()
+        # poolはwithブロック内で定義されているため、ここでは何もしない
+        # withブロックの終了時に自動的にクリーンアップされる
     
     total_time = time.time() - start_time
     
@@ -576,7 +573,8 @@ def run_batch_parallel():
     print(f"処理完了!")
     print(f"  処理条件数: {len(results)}/{total_conditions}")
     print(f"  総処理時間: {total_time:.2f}秒")
-    print(f"  平均処理速度: {len(results)/total_time:.2f}条件/秒")
+    if total_time > 0:
+        print(f"  平均処理速度: {len(results)/total_time:.2f}条件/秒")
     
     # パフォーマンス統計
     if len(results) > 0:

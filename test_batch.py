@@ -7,13 +7,13 @@ AWS環境でのテスト用（少ない条件数で動作確認）
 import sys
 import os
 
+# テスト用の設定でMODE環境変数を設定（importより前に）
+os.environ['MODE'] = 'BATCH_PARALLEL'
+
 # main.pyのパスを追加
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# テスト用の設定で main.py をインポート
-os.environ['MODE'] = 'BATCH_PARALLEL'
-
-# main.pyの設定を上書き
+# main.pyをインポート
 import main
 
 # テスト用に小規模な範囲に変更
