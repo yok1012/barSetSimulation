@@ -4,14 +4,6 @@
 AWS最適化バージョン: 並列処理とCPU効率の改善
 """
 
-import pygame
-import pymunk
-import pymunk.pygame_util
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib import font_manager
 import os
 import sys
 import math
@@ -19,8 +11,41 @@ import multiprocessing as mp
 from functools import partial
 from itertools import product
 import time
-import psutil
 import signal
+
+# 必須パッケージ
+import pymunk
+import numpy as np
+import pandas as pd
+
+# 可視化パッケージ（ヒートマップ生成用）
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # GUI不要のバックエンド
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from matplotlib import font_manager
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+    print("警告: matplotlib/seabornがインストールされていません。ヒートマップは生成されません。")
+
+# pygame（ヘッドレスモードでは不要）
+try:
+    import pygame
+    import pymunk.pygame_util
+    HAS_PYGAME = True
+except ImportError:
+    HAS_PYGAME = False
+    print("警告: pygameがインストールされていません。インタラクティブモードは使用できません。")
+
+# システム情報取得パッケージ
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+    print("警告: psutilがインストールされていません。CPU affinityなどの最適化機能は無効になります。")
 
 # ===== 設定 =====
 # 実行モード: INTERACTIVE, BATCH, BATCH_PARALLEL, SINGLE
@@ -98,8 +123,8 @@ def init_worker(worker_id, total_workers):
     # シグナルハンドラをデフォルトに設定（親プロセスから継承しない）
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     
-    # CPUアフィニティ設定
-    if AWS_OPTIMIZATIONS['use_cpu_affinity']:
+    # CPUアフィニティ設定（psutilが利用可能な場合のみ）
+    if HAS_PSUTIL and AWS_OPTIMIZATIONS['use_cpu_affinity']:
         try:
             p = psutil.Process()
             cpu_count = psutil.cpu_count(logical=True)
@@ -110,8 +135,8 @@ def init_worker(worker_id, total_workers):
             # CPU affinity設定失敗は警告のみ（動作は継続）
             pass
     
-    # プロセス優先度設定
-    if AWS_OPTIMIZATIONS['set_process_priority']:
+    # プロセス優先度設定（psutilが利用可能な場合のみ）
+    if HAS_PSUTIL and AWS_OPTIMIZATIONS['set_process_priority']:
         try:
             p = psutil.Process()
             # 高優先度に設定（-5から-10の範囲推奨）
@@ -142,12 +167,15 @@ class BarSimulation:
         self.headless = headless
         
         # Pygame初期化（ヘッドレスモードでは不要）
-        if not headless:
+        if not headless and HAS_PYGAME:
             pygame.init()
             self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
             pygame.display.set_caption('Bar Set Simulation')
             self.clock = pygame.time.Clock()
             self.draw_options = pymunk.pygame_util.DrawOptions(self.screen)
+        elif not headless and not HAS_PYGAME:
+            print("警告: pygameがないため、描画は無効化されました")
+            self.headless = True
         
         # 物理空間初期化
         self.space = pymunk.Space()
@@ -312,7 +340,7 @@ class BarSimulation:
         
     def cleanup(self):
         """クリーンアップ"""
-        if not self.headless:
+        if not self.headless and HAS_PYGAME:
             pygame.quit()
 
 
@@ -421,12 +449,21 @@ def get_system_info():
     Returns:
         info: システム情報辞書
     """
-    info = {
-        'cpu_count': psutil.cpu_count(logical=True),
-        'cpu_count_physical': psutil.cpu_count(logical=False),
-        'memory_total_gb': psutil.virtual_memory().total / (1024**3),
-        'memory_available_gb': psutil.virtual_memory().available / (1024**3),
-    }
+    if HAS_PSUTIL:
+        info = {
+            'cpu_count': psutil.cpu_count(logical=True),
+            'cpu_count_physical': psutil.cpu_count(logical=False),
+            'memory_total_gb': psutil.virtual_memory().total / (1024**3),
+            'memory_available_gb': psutil.virtual_memory().available / (1024**3),
+        }
+    else:
+        # psutilがない場合はmultiprocessingのみ使用
+        info = {
+            'cpu_count': mp.cpu_count(),
+            'cpu_count_physical': mp.cpu_count(),
+            'memory_total_gb': 0,
+            'memory_available_gb': 0,
+        }
     return info
 
 
@@ -441,8 +478,12 @@ def run_batch_parallel():
     print(f"\nシステム情報:")
     print(f"  CPU数（論理）: {sys_info['cpu_count']}")
     print(f"  CPU数（物理）: {sys_info['cpu_count_physical']}")
-    print(f"  総メモリ: {sys_info['memory_total_gb']:.2f} GB")
-    print(f"  利用可能メモリ: {sys_info['memory_available_gb']:.2f} GB")
+    if sys_info['memory_total_gb'] > 0:
+        print(f"  総メモリ: {sys_info['memory_total_gb']:.2f} GB")
+        print(f"  利用可能メモリ: {sys_info['memory_available_gb']:.2f} GB")
+    else:
+        print(f"  総メモリ: 不明 (psutilが必要)")
+        print(f"  利用可能メモリ: 不明 (psutilが必要)")
     
     # パラメータ組み合わせ生成
     param_combinations = list(product(
@@ -472,8 +513,10 @@ def run_batch_parallel():
         chunk_size = AWS_OPTIMIZATIONS['chunk_size']
     print(f"  チャンクサイズ: {chunk_size}")
     
-    if AWS_OPTIMIZATIONS['use_cpu_affinity']:
+    if HAS_PSUTIL and AWS_OPTIMIZATIONS['use_cpu_affinity']:
         print(f"  CPU affinity: 有効")
+    elif AWS_OPTIMIZATIONS['use_cpu_affinity']:
+        print(f"  CPU affinity: 無効 (psutilが必要)")
     
     # 並列処理実行
     start_time = time.time()
@@ -507,14 +550,17 @@ def run_batch_parallel():
                     eta = (total_conditions - i) / rate if rate > 0 else 0
                     
                     # メモリ使用状況
-                    mem_info = psutil.virtual_memory()
-                    mem_percent = mem_info.percent
+                    if HAS_PSUTIL:
+                        mem_info = psutil.virtual_memory()
+                        mem_percent = mem_info.percent
+                        mem_str = f"メモリ: {mem_percent:4.1f}%"
+                    else:
+                        mem_str = ""
                     
                     print(f"進捗: {i:6d}/{total_conditions} ({progress:5.1f}%) | "
                           f"経過: {elapsed:7.1f}秒 | "
                           f"速度: {rate:5.2f}条件/秒 | "
-                          f"残り: {eta:7.1f}秒 | "
-                          f"メモリ: {mem_percent:4.1f}%")
+                          f"残り: {eta:7.1f}秒" + (f" | {mem_str}" if mem_str else ""))
                     
                     last_progress_time = current_time
                     
@@ -603,6 +649,10 @@ def run_batch_sequential():
 
 def generate_heatmaps(df):
     """ヒートマップ生成"""
+    if not HAS_MATPLOTLIB:
+        print("\n警告: matplotlibがインストールされていないため、ヒートマップを生成できません。")
+        return
+    
     print("\nヒートマップを生成中...")
     
     # 日本語フォント設定
