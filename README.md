@@ -25,6 +25,61 @@
 
 ---
 
+## セットアップ（GitHub からクローン後）
+
+初回のみ、以下の流れで Python 仮想環境を作成して依存ライブラリをインストールします。
+
+### 1. リポジトリをクローン
+```powershell
+git clone <リポジトリURL>
+cd barSetSimulation
+```
+
+### 2. Python 仮想環境（venv）を作成
+プロジェクト直下に `.venv` という仮想環境を作成します（推奨）。
+```powershell
+python -m venv .venv
+```
+
+### 3. 仮想環境を有効化
+**Windows（PowerShell）:**
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+> 「スクリプトの実行が無効」というエラーが出る場合は、一度だけ次を実行してから再度有効化してください。
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+
+**Windows（コマンドプロンプト / cmd）:**
+```bat
+.\.venv\Scripts\activate.bat
+```
+
+**macOS / Linux:**
+```bash
+source .venv/bin/activate
+```
+
+有効化に成功するとプロンプトの先頭に `(.venv)` と表示されます。
+
+### 4. pip を更新して依存ライブラリをインストール
+```powershell
+python -m pip install --upgrade pip
+pip install pygame pymunk numpy pandas matplotlib seaborn psutil streamlit
+```
+
+### 5. 動作確認（Streamlit UI を起動）
+```powershell
+streamlit run streamlit_app.py
+```
+ブラウザが開けばセットアップ完了です。詳しい使い方は [使用方法](#使用方法) を参照してください。
+
+> 2回目以降は **手順3（有効化）だけ** 実行すればすぐに使えます。
+> 仮想環境を抜けるときは `deactivate` と入力します。
+
+---
+
 ## 実行モード
 
 | モード | 目的 | 出力 |
