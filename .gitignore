@@ -25,5 +25,8 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Streamlit UI の永続化設定（ローカル環境ごと）
+.streamlit_ui_settings.json
+
 # Results (optional - コメントアウトして管理する場合)
 # results*/
