@@ -5,6 +5,7 @@ import math
 import itertools
 import os
 import random
+from datetime import datetime
 
 # --- ライブラリのインポートチェック ---
 try:
@@ -347,15 +348,17 @@ def check_bar_contact_side(bar_body, wall_segment, contact_point, contact_normal
 
 
 
-def draw_coordinates(surface, font):
+def draw_coordinates(surface, font, off_x=0, off_y=0):
+    # off_x / off_y はワールド座標→サーフェス座標の平行移動量。
+    # デフォルト0なら従来どおり（インタラクティブモードは不変）。
     grid_color = pygame.Color("lightgray");
     label_color = pygame.Color("gray")
     for x in range(0, WIDTH, 100):
-        pygame.draw.line(surface, grid_color, (x, 0), (x, HEIGHT))
-        surface.blit(font.render(str(x), True, label_color), (x + 5, 5))
+        pygame.draw.line(surface, grid_color, (x + off_x, off_y), (x + off_x, HEIGHT + off_y))
+        surface.blit(font.render(str(x), True, label_color), (x + off_x + 5, off_y + 5))
     for y in range(0, HEIGHT, 100):
-        pygame.draw.line(surface, grid_color, (0, y), (WIDTH, y))
-        surface.blit(font.render(str(y), True, label_color), (5, y + 5))
+        pygame.draw.line(surface, grid_color, (off_x, y + off_y), (WIDTH + off_x, y + off_y))
+        surface.blit(font.render(str(y), True, label_color), (off_x + 5, y + off_y + 5))
 
 
 ### --- モード別実行関数 ---
@@ -1068,16 +1071,38 @@ def run_single_condition_mode():
     for _ in range(int(SIMULATION_DURATION / (1.0 / 60.0))):
         space.step(1.0 / 60.0)
         trajectory.append((bar.body.position.x, bar.body.position.y))
-    surface.fill(pygame.Color("white"));
-    draw_coordinates(surface, font_coords)
-    space.debug_draw(draw_options)
+    # --- 描画キャンバスの動的サイズ計算 ---
+    # リリース位置や軌跡がステージ枠(0..WIDTH / 0..HEIGHT)の外に出ても見切れないよう、
+    # 全描画要素を含む境界からキャンバスサイズと平行移動量(OX, OY)を求める。
+    final_x, final_y = bar.body.position.x, bar.body.position.y
     initial_vertices = get_rect_vertices(release_pos, (BAR_WIDTH * PPM, BAR_HEIGHT * PPM), actual_release_angle_rad)
-    initial_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-    pygame.draw.polygon(initial_surf, (30, 144, 255, 128), initial_vertices)
+    ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
+    bound_xs = [0, WIDTH, release_pos[0], final_x, ideal_x] + [v[0] for v in initial_vertices] + [p[0] for p in trajectory]
+    bound_ys = [0, HEIGHT, release_pos[1], final_y, ideal_y] + [v[1] for v in initial_vertices] + [p[1] for p in trajectory]
+    margin = 300
+    min_x, max_x = min(bound_xs) - margin, max(bound_xs) + margin
+    min_y, max_y = min(bound_ys) - margin, max(bound_ys) + margin
+    OX, OY = -min_x, -min_y
+    out_w, out_h = int(max_x - min_x), int(max_y - min_y)
+
+    def P(x, y):
+        """ワールド座標 (x, y) を拡張キャンバス上のピクセル座標へ変換する。"""
+        return (int(x + OX), int(y + OY))
+
+    # 拡張サイズでサーフェスと debug_draw を作り直す（debug_draw は transform で平行移動）
+    surface = pygame.Surface((out_w, out_h))
+    draw_options = pymunk.pygame_util.DrawOptions(surface)
+    draw_options.transform = pymunk.Transform.translation(OX, OY)
+
+    surface.fill(pygame.Color("white"));
+    draw_coordinates(surface, font_coords, OX, OY)
+    space.debug_draw(draw_options)
+    initial_surf = pygame.Surface((out_w, out_h), pygame.SRCALPHA)
+    pygame.draw.polygon(initial_surf, (30, 144, 255, 128), [P(*v) for v in initial_vertices])
     surface.blit(initial_surf, (0, 0))
 
     # --- 初期位置→最終到達地点の軌跡を描画（マゼンタの折れ線） ---
-    traj_points = [(int(x), int(y)) for x, y in trajectory]
+    traj_points = [P(x, y) for x, y in trajectory]
     if len(traj_points) >= 2:
         pygame.draw.lines(surface, (200, 0, 200), False, traj_points, 3)
         # 始点（リリース位置）を強調
@@ -1090,12 +1115,12 @@ def run_single_condition_mode():
     gx, gy = 90, 90
     axis_len = 380
     screen_axis_color = (90, 90, 90)
-    draw_arrow(surface, screen_axis_color, (gx, gy), (gx + axis_len, gy))
-    draw_arrow(surface, screen_axis_color, (gx, gy), (gx, gy + axis_len))
-    pygame.draw.circle(surface, screen_axis_color, (gx, gy), 10, 3)
-    surface.blit(font_label_s.render("画面原点(0,0)", True, screen_axis_color), (gx + 20, gy - 70))
-    surface.blit(font_label_s.render("X (μm) →", True, screen_axis_color), (gx + axis_len - 180, gy + 14))
-    surface.blit(font_label_s.render("Y (μm) ↓", True, screen_axis_color), (gx + 20, gy + axis_len - 6))
+    draw_arrow(surface, screen_axis_color, P(gx, gy), P(gx + axis_len, gy))
+    draw_arrow(surface, screen_axis_color, P(gx, gy), P(gx, gy + axis_len))
+    pygame.draw.circle(surface, screen_axis_color, P(gx, gy), 10, 3)
+    surface.blit(font_label_s.render("画面原点(0,0)", True, screen_axis_color), P(gx + 20, gy - 70))
+    surface.blit(font_label_s.render("X (μm) →", True, screen_axis_color), P(gx + axis_len - 180, gy + 14))
+    surface.blit(font_label_s.render("Y (μm) ↓", True, screen_axis_color), P(gx + 20, gy + axis_len - 6))
 
     # (2) オフセット基準軸（原点=理想位置。+X/+Y オフセット方向。角度連動も反映）
     ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
@@ -1110,19 +1135,19 @@ def run_single_condition_mode():
     x_axis_color = (139, 69, 19)   # 茶: +Xオフセット
     y_axis_color = (0, 128, 128)   # 青緑: +Yオフセット
     ox, oy = ideal_x, ideal_y      # オフセット原点 = 理想位置
-    draw_arrow(surface, x_axis_color, (ox, oy), (ox + xdir[0] * axis_len, oy + xdir[1] * axis_len))
-    draw_arrow(surface, y_axis_color, (ox, oy), (ox + ydir[0] * axis_len, oy + ydir[1] * axis_len))
+    draw_arrow(surface, x_axis_color, P(ox, oy), P(ox + xdir[0] * axis_len, oy + xdir[1] * axis_len))
+    draw_arrow(surface, y_axis_color, P(ox, oy), P(ox + ydir[0] * axis_len, oy + ydir[1] * axis_len))
     surface.blit(font_label_s.render("+X offset", True, x_axis_color),
-                 (int(ox + xdir[0] * axis_len) + 10, int(oy + xdir[1] * axis_len) - 20))
+                 P(ox + xdir[0] * axis_len + 10, oy + xdir[1] * axis_len - 20))
     surface.blit(font_label_s.render("+Y offset", True, y_axis_color),
-                 (int(ox + ydir[0] * axis_len) + 10, int(oy + ydir[1] * axis_len) - 20))
+                 P(ox + ydir[0] * axis_len + 10, oy + ydir[1] * axis_len - 20))
     surface.blit(font_coords.render(f"オフセット原点=理想位置 {mode_note}", True, (80, 80, 80)),
-                 (int(ox) + 16, int(oy) + 95))
+                 P(ox + 16, oy + 95))
     # BASE（斜面と壁の角）を参考マーカーとして表示
-    pygame.draw.circle(surface, (200, 0, 0), (int(BASE_X), int(BASE_Y)), 12, 3)
-    pygame.draw.line(surface, (200, 0, 0), (int(BASE_X) - 18, int(BASE_Y)), (int(BASE_X) + 18, int(BASE_Y)), 3)
-    pygame.draw.line(surface, (200, 0, 0), (int(BASE_X), int(BASE_Y) - 18), (int(BASE_X), int(BASE_Y) + 18), 3)
-    surface.blit(font_label_s.render("BASE(角)", True, (200, 0, 0)), (int(BASE_X) + 16, int(BASE_Y) + 16))
+    pygame.draw.circle(surface, (200, 0, 0), P(BASE_X, BASE_Y), 12, 3)
+    pygame.draw.line(surface, (200, 0, 0), P(BASE_X - 18, BASE_Y), P(BASE_X + 18, BASE_Y), 3)
+    pygame.draw.line(surface, (200, 0, 0), P(BASE_X, BASE_Y - 18), P(BASE_X, BASE_Y + 18), 3)
+    surface.blit(font_label_s.render("BASE(角)", True, (200, 0, 0)), P(BASE_X + 16, BASE_Y + 16))
 
     # --- 理想位置からのズレを計算・描画 ---
     final_x, final_y = bar.body.position.x, bar.body.position.y
@@ -1131,14 +1156,22 @@ def run_single_condition_mode():
     tolerance = SUCCESS_CRITERIA['position_tolerance']
     within_tol = diff_px <= tolerance
 
+    # --- 落ちたバーの最終位置の形状（矩形）をそのまま描画して残す ---
+    # リリース位置は半透明の青なので、最終位置はオレンジ塗り＋枠線で区別する
+    final_bar_vertices = get_rect_vertices(bar.body.position, (BAR_WIDTH * PPM, BAR_HEIGHT * PPM), bar.body.angle)
+    final_bar_surf = pygame.Surface((out_w, out_h), pygame.SRCALPHA)
+    pygame.draw.polygon(final_bar_surf, (255, 140, 0, 150), [P(*v) for v in final_bar_vertices])    # 半透明オレンジで塗り
+    pygame.draw.polygon(final_bar_surf, (200, 90, 0, 255), [P(*v) for v in final_bar_vertices], 4)  # 濃いオレンジの枠線
+    surface.blit(final_bar_surf, (0, 0))
+
     # 理想位置（緑）・最終位置（青）・誤差線（橙）のマーカー
-    pygame.draw.circle(surface, (0, 180, 0), (int(ideal_x), int(ideal_y)), 18, 4)
-    pygame.draw.line(surface, (0, 180, 0), (int(ideal_x) - 28, int(ideal_y)), (int(ideal_x) + 28, int(ideal_y)), 3)
-    pygame.draw.line(surface, (0, 180, 0), (int(ideal_x), int(ideal_y) - 28), (int(ideal_x), int(ideal_y) + 28), 3)
-    surface.blit(font_label_s.render("理想位置", True, (0, 140, 0)), (int(ideal_x) + 34, int(ideal_y) - 30))
-    pygame.draw.circle(surface, (0, 0, 255), (int(final_x), int(final_y)), 16, 4)
-    surface.blit(font_label_s.render("最終位置", True, (0, 0, 220)), (int(final_x) + 34, int(final_y) + 10))
-    pygame.draw.line(surface, (255, 120, 0), (int(ideal_x), int(ideal_y)), (int(final_x), int(final_y)), 4)
+    pygame.draw.circle(surface, (0, 180, 0), P(ideal_x, ideal_y), 18, 4)
+    pygame.draw.line(surface, (0, 180, 0), P(ideal_x - 28, ideal_y), P(ideal_x + 28, ideal_y), 3)
+    pygame.draw.line(surface, (0, 180, 0), P(ideal_x, ideal_y - 28), P(ideal_x, ideal_y + 28), 3)
+    surface.blit(font_label_s.render("理想位置", True, (0, 140, 0)), P(ideal_x + 34, ideal_y - 30))
+    pygame.draw.circle(surface, (0, 0, 255), P(final_x, final_y), 16, 4)
+    surface.blit(font_label_s.render("最終位置", True, (0, 0, 220)), P(final_x + 34, final_y + 10))
+    pygame.draw.line(surface, (255, 120, 0), P(ideal_x, ideal_y), P(final_x, final_y), 4)
 
     # ズレ値のテキスト（上部・画面座標軸と重ならない位置、背景付きで見やすく）
     judge_color = (0, 150, 0) if within_tol else (210, 0, 0)
@@ -1174,7 +1207,13 @@ def run_single_condition_mode():
         surface.blit(font_label_s.render(text, True, (40, 40, 40)), (box_x + pad, cty))
         cty += 64
 
-    filepath = os.path.join(OUTPUT_DIR, "single_condition_result.png")
+    # ファイル名に日時・ステージ角度・落とした距離（リリースX/Yオフセット）を含めて毎回別名で保存する
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    judge = "OK" if within_tol else "NG"
+    rx = params['release_x_offset']
+    ry = params['release_y_offset']
+    filename = f"single_result_{ts}_angle{params['angle']}deg_x{rx}um_y{ry}um_{judge}.png"
+    filepath = os.path.join(OUTPUT_DIR, filename)
     pygame.image.save(surface, filepath);
     pygame.quit()
 
