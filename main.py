@@ -55,6 +55,14 @@ PPM = 1000000.0         # 1,000,000 pixels/m = 1 pixel/μm
 SIMULATION_DURATION = 4.0
 ENABLE_FLOOR_FAIL_VALIDATION = True
 
+# --- GIF アニメーション出力設定（SINGLE モード）---
+# バーがセットされるまでの動きを GIF として出力する。
+GENERATE_GIF = True       # True で SINGLE モード実行時に動きの GIF を出力
+GIF_FRAME_STEP = 2        # 何ステップごとに1フレーム描画するか（小さいほど滑らか・大きいほど軽量）
+GIF_FPS = 30              # GIF の再生フレームレート（GIF_FRAME_STEP=2 のとき実時間とほぼ一致）
+GIF_MAX_WIDTH = 800       # GIF の最大横幅(px)。これを超える場合は縮小して書き出す
+GIF_COLORS = 96           # GIF パレットの色数（少ないほどファイルが軽い）
+
 # --- リリースオフセットの座標系 ---
 # オフセットの原点は「理想位置」。offset=(0,0) でリリース位置＝理想位置になる。
 # False: 画面固定軸。実X = ideal_x + Xオフセット, 実Y = ideal_y - Yオフセット
@@ -1067,10 +1075,13 @@ def run_single_condition_mode():
         print(f"警告: 衝突ハンドラの登録に失敗しました: {e}")
 
     # シミュレーションを進めながらバー重心の軌跡を記録する
+    # GIF 出力用に各ステップのバー状態 (x, y, 角度) も記録しておく
     trajectory = [(bar.body.position.x, bar.body.position.y)]
+    bar_states = [(bar.body.position.x, bar.body.position.y, bar.body.angle)]
     for _ in range(int(SIMULATION_DURATION / (1.0 / 60.0))):
         space.step(1.0 / 60.0)
         trajectory.append((bar.body.position.x, bar.body.position.y))
+        bar_states.append((bar.body.position.x, bar.body.position.y, bar.body.angle))
     # --- 描画キャンバスの動的サイズ計算 ---
     # リリース位置や軌跡がステージ枠(0..WIDTH / 0..HEIGHT)の外に出ても見切れないよう、
     # 全描画要素を含む境界からキャンバスサイズと平行移動量(OX, OY)を求める。
@@ -1215,6 +1226,58 @@ def run_single_condition_mode():
     filename = f"single_result_{ts}_angle{params['angle']}deg_x{rx}um_y{ry}um_{judge}.png"
     filepath = os.path.join(OUTPUT_DIR, filename)
     pygame.image.save(surface, filepath);
+
+    # --- バーがセットされるまでの動きを GIF として書き出す ---
+    gif_filename = None
+    if GENERATE_GIF:
+        try:
+            from PIL import Image
+            # (1) バー以外の静的背景（グリッド＋斜面＋壁＋理想位置マーカー）を1枚だけ作る
+            base = pygame.Surface((out_w, out_h))
+            base.fill(pygame.Color("white"))
+            draw_coordinates(base, font_coords, OX, OY)
+            space.remove(bar.body, bar)  # 動くバーを外し、静的形状のみを描画
+            base_opts = pymunk.pygame_util.DrawOptions(base)
+            base_opts.transform = pymunk.Transform.translation(OX, OY)
+            space.debug_draw(base_opts)
+            # 理想位置（緑の十字）を背景に重ねておく
+            pygame.draw.circle(base, (0, 180, 0), P(ideal_x, ideal_y), 18, 4)
+            pygame.draw.line(base, (0, 180, 0), P(ideal_x - 28, ideal_y), P(ideal_x + 28, ideal_y), 3)
+            pygame.draw.line(base, (0, 180, 0), P(ideal_x, ideal_y - 28), P(ideal_x, ideal_y + 28), 3)
+            base.blit(font_label_s.render("理想位置", True, (0, 140, 0)), P(ideal_x + 34, ideal_y - 30))
+
+            # (2) 各フレームでバー矩形だけを描き重ね、PIL Image へ変換する
+            bar_size = (BAR_WIDTH * PPM, BAR_HEIGHT * PPM)
+            scale = min(1.0, GIF_MAX_WIDTH / out_w)
+            gif_w, gif_h = int(out_w * scale), int(out_h * scale)
+            frames = []
+            for i in range(0, len(bar_states), GIF_FRAME_STEP):
+                bx, by, bang = bar_states[i]
+                frame = base.copy()
+                verts = [P(*v) for v in get_rect_vertices((bx, by), bar_size, bang)]
+                pygame.draw.polygon(frame, (30, 144, 255), verts)        # バー本体（青）
+                pygame.draw.polygon(frame, (0, 0, 150), verts, 3)        # 枠線（濃紺）
+                # 経過時間ラベル
+                t = i / 60.0
+                frame.blit(font_label_s.render(f"t = {t:.2f} s", True, (40, 40, 40)), (box_x + pad, 40))
+                img = Image.frombytes("RGB", (out_w, out_h), pygame.image.tostring(frame, "RGB"))
+                if scale < 1.0:
+                    img = img.resize((gif_w, gif_h), Image.LANCZOS)
+                # パレット化してファイルを軽くする
+                frames.append(img.convert("P", palette=Image.ADAPTIVE, colors=GIF_COLORS))
+
+            if frames:
+                gif_filename = filename.replace(".png", ".gif")
+                gif_path = os.path.join(OUTPUT_DIR, gif_filename)
+                durations = [int(1000 / GIF_FPS)] * len(frames)
+                durations[-1] = 1500  # 最後のフレーム（静止状態）は1.5秒間保持
+                frames[0].save(gif_path, save_all=True, append_images=frames[1:],
+                               duration=durations, loop=0, optimize=True, disposal=2)
+        except ImportError:
+            print("注意: Pillow が見つからないため GIF 出力をスキップしました（pip install Pillow）。")
+        except Exception as e:
+            print(f"注意: GIF 出力に失敗しました: {e}")
+
     pygame.quit()
 
     # 標準出力（Streamlit でパースする機械可読マーカー付き）
@@ -1239,6 +1302,8 @@ def run_single_condition_mode():
     print(f"SHORT_EXCLUDED: {c['excluded_near_ideal']}")
     print(f"LONG_TOTAL: {c['long']}")
     print(f"- 結果を '{filepath}' に保存しました。")
+    if gif_filename:
+        print(f"- 動きのGIFを '{os.path.join(OUTPUT_DIR, gif_filename)}' に保存しました。")
 
 
 def generate_heatmaps(df):
