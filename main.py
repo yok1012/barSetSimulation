@@ -763,9 +763,9 @@ def run_interactive_mode():
                 print()
                 print("--- 位置差分（成分別） ---")
                 print(f"X方向差分: {actual_x - ideal_x:.3f} μm")
-                print(f"Y方向差分: {actual_y - ideal_y:.3f} μm")
+                print(f"Z方向差分: {actual_y - ideal_y:.3f} μm")
                 print(f"BASE からの X差分: {actual_x - BASE_X:.3f} μm")
-                print(f"BASE からの Y差分: {actual_y - BASE_Y:.3f} μm")
+                print(f"BASE からの Z差分: {actual_y - BASE_Y:.3f} μm")
                 print()
                 print("--- 接触状態 ---")
                 print(f"斜面接触: {touching_slope}")
@@ -848,7 +848,7 @@ def run_interactive_mode():
                 f"ステージ角度: {-stage_angle_deg:.1f}°",
                 f"理想位置: ({ideal_x:.1f}, {ideal_y:.1f}) μm",
                 f"実際位置: ({actual_x:.1f}, {actual_y:.1f}) μm",
-                f"差分: X={actual_x-ideal_x:.1f}, Y={actual_y-ideal_y:.1f} μm",
+                f"差分: X={actual_x-ideal_x:.1f}, Z={actual_y-ideal_y:.1f} μm",
                 f"BASE: ({BASE_X}, {BASE_Y}) μm",
                 f"BASE→Bar距離: {dist_base_to_bar:.1f} μm",
                 f"BASE→Ideal距離: {dist_base_to_ideal:.1f} μm"
@@ -887,7 +887,7 @@ def run_interactive_mode():
         # ===== UI要素の描画（固定サイズ、スケール変換されない） =====
         # パラメータ表示（左上）
         param_labels = {"angle": ("ステージ角度", "°"), "relative_angle": ("相対リリース角度", "°"), 
-                        "release_x_offset": ("リリース X", "μm"), "release_y_offset": ("リリース Y", "μm")}
+                        "release_x_offset": ("リリース X", "μm"), "release_y_offset": ("リリース Z", "μm")}
         y_offset = 10
         for p_name, (label, unit) in param_labels.items():
             color = (0, 0, 200) if editing_param == p_name else (0, 0, 0)
@@ -1122,7 +1122,7 @@ def run_single_condition_mode():
                      (traj_points[0][0] + 30, traj_points[0][1] - 70))
 
     # --- 座標軸の表記 ---
-    # (1) 画面座標軸（左上・原点(0,0)、X→右 / Y↓下）
+    # (1) 画面座標軸（左上・原点(0,0)、X→右 / Z↓下）
     gx, gy = 90, 90
     axis_len = 380
     screen_axis_color = (90, 90, 90)
@@ -1131,26 +1131,26 @@ def run_single_condition_mode():
     pygame.draw.circle(surface, screen_axis_color, P(gx, gy), 10, 3)
     surface.blit(font_label_s.render("画面原点(0,0)", True, screen_axis_color), P(gx + 20, gy - 70))
     surface.blit(font_label_s.render("X (μm) →", True, screen_axis_color), P(gx + axis_len - 180, gy + 14))
-    surface.blit(font_label_s.render("Y (μm) ↓", True, screen_axis_color), P(gx + 20, gy + axis_len - 6))
+    surface.blit(font_label_s.render("Z (μm) ↓", True, screen_axis_color), P(gx + 20, gy + axis_len - 6))
 
-    # (2) オフセット基準軸（原点=理想位置。+X/+Y オフセット方向。角度連動も反映）
+    # (2) オフセット基準軸（原点=理想位置。+X/+Z オフセット方向。角度連動も反映）
     ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
     if ANGLE_LINKED_OFFSET:
         xdir = (math.cos(stage_angle_rad), math.sin(stage_angle_rad))    # +Xオフセット（斜面方向）
-        ydir = (math.sin(stage_angle_rad), -math.cos(stage_angle_rad))   # +Yオフセット（壁方向）
+        ydir = (math.sin(stage_angle_rad), -math.cos(stage_angle_rad))   # +Zオフセット（壁方向）
         mode_note = "（ステージ角度に連動）"
     else:
         xdir = (1.0, 0.0)    # +Xオフセット → 右
-        ydir = (0.0, -1.0)   # +Yオフセット → 上
+        ydir = (0.0, -1.0)   # +Zオフセット → 上
         mode_note = "（画面固定）"
     x_axis_color = (139, 69, 19)   # 茶: +Xオフセット
-    y_axis_color = (0, 128, 128)   # 青緑: +Yオフセット
+    y_axis_color = (0, 128, 128)   # 青緑: +Zオフセット
     ox, oy = ideal_x, ideal_y      # オフセット原点 = 理想位置
     draw_arrow(surface, x_axis_color, P(ox, oy), P(ox + xdir[0] * axis_len, oy + xdir[1] * axis_len))
     draw_arrow(surface, y_axis_color, P(ox, oy), P(ox + ydir[0] * axis_len, oy + ydir[1] * axis_len))
     surface.blit(font_label_s.render("+X offset", True, x_axis_color),
                  P(ox + xdir[0] * axis_len + 10, oy + xdir[1] * axis_len - 20))
-    surface.blit(font_label_s.render("+Y offset", True, y_axis_color),
+    surface.blit(font_label_s.render("+Z offset", True, y_axis_color),
                  P(ox + ydir[0] * axis_len + 10, oy + ydir[1] * axis_len - 20))
     surface.blit(font_coords.render(f"オフセット原点=理想位置 {mode_note}", True, (80, 80, 80)),
                  P(ox + 16, oy + 95))
@@ -1226,6 +1226,8 @@ def run_single_condition_mode():
     filename = f"single_result_{ts}_angle{params['angle']}deg_x{rx}um_y{ry}um_{judge}.png"
     filepath = os.path.join(OUTPUT_DIR, filename)
     pygame.image.save(surface, filepath);
+    latest_filepath = os.path.join(OUTPUT_DIR, "single_condition_result.png")
+    pygame.image.save(surface, latest_filepath)
 
     # --- バーがセットされるまでの動きを GIF として書き出す ---
     gif_filename = None
@@ -1246,7 +1248,19 @@ def run_single_condition_mode():
             pygame.draw.line(base, (0, 180, 0), P(ideal_x, ideal_y - 28), P(ideal_x, ideal_y + 28), 3)
             base.blit(font_label_s.render("理想位置", True, (0, 140, 0)), P(ideal_x + 34, ideal_y - 30))
 
-            # (2) 各フレームでバー矩形だけを描き重ね、PIL Image へ変換する
+            # 落下開始位置（マゼンタの円）と落下終了位置（青の十字）を背景に重ねておく
+            start_pt = P(*release_pos)
+            end_pt = P(final_x, final_y)
+            pygame.draw.circle(base, (200, 0, 200), start_pt, 14, 4)
+            base.blit(font_label_s.render("落下開始位置", True, (160, 0, 160)),
+                      (start_pt[0] + 20, start_pt[1] - 60))
+            pygame.draw.circle(base, (0, 0, 255), end_pt, 16, 4)
+            pygame.draw.line(base, (0, 0, 255), (end_pt[0] - 24, end_pt[1]), (end_pt[0] + 24, end_pt[1]), 2)
+            pygame.draw.line(base, (0, 0, 255), (end_pt[0], end_pt[1] - 24), (end_pt[0], end_pt[1] + 24), 2)
+            base.blit(font_label_s.render("落下終了位置", True, (0, 0, 200)),
+                      (end_pt[0] + 20, end_pt[1] + 20))
+
+            # (2) 各フレームでバー矩形と「そのフレームまでの軌跡」を描き重ね、PIL Image へ変換する
             bar_size = (BAR_WIDTH * PPM, BAR_HEIGHT * PPM)
             scale = min(1.0, GIF_MAX_WIDTH / out_w)
             gif_w, gif_h = int(out_w * scale), int(out_h * scale)
@@ -1254,6 +1268,10 @@ def run_single_condition_mode():
             for i in range(0, len(bar_states), GIF_FRAME_STEP):
                 bx, by, bang = bar_states[i]
                 frame = base.copy()
+                # 落下の軌跡（現フレームまでの重心の通過点）をマゼンタの折れ線で描画
+                traj_so_far = [P(*p) for p in trajectory[:i + 1]]
+                if len(traj_so_far) >= 2:
+                    pygame.draw.lines(frame, (200, 0, 200), False, traj_so_far, 3)
                 verts = [P(*v) for v in get_rect_vertices((bx, by), bar_size, bang)]
                 pygame.draw.polygon(frame, (30, 144, 255), verts)        # バー本体（青）
                 pygame.draw.polygon(frame, (0, 0, 150), verts, 3)        # 枠線（濃紺）
@@ -1302,6 +1320,7 @@ def run_single_condition_mode():
     print(f"SHORT_EXCLUDED: {c['excluded_near_ideal']}")
     print(f"LONG_TOTAL: {c['long']}")
     print(f"- 結果を '{filepath}' に保存しました。")
+    print(f"- 最新結果画像を '{latest_filepath}' に保存しました。")
     if gif_filename:
         print(f"- 動きのGIFを '{os.path.join(OUTPUT_DIR, gif_filename)}' に保存しました。")
 
@@ -1383,11 +1402,11 @@ def generate_heatmaps(df):
         if jp_font:
             ax.set_title(f'ステージ角度: {angle}°', fontproperties=jp_font, fontsize=14)
             ax.set_xlabel('リリース X位置', fontproperties=jp_font)
-            ax.set_ylabel('リリース Y位置', fontproperties=jp_font)
+            ax.set_ylabel('リリース Z位置', fontproperties=jp_font)
         else:
             ax.set_title(f'Stage Angle: {angle}°', fontsize=14)
             ax.set_xlabel('Release X Position')
-            ax.set_ylabel('Release Y Position')
+            ax.set_ylabel('Release Z Position')
         
         # カラーバーを追加
         cbar = plt.colorbar(im, ax=ax)
@@ -1448,11 +1467,11 @@ def generate_heatmaps(df):
         if jp_font:
             ax.set_title(f'ステージ角度 {angle}° の成功率分布（インタラクティブ）', fontproperties=jp_font, fontsize=16)
             ax.set_xlabel('リリース X位置', fontproperties=jp_font, fontsize=12)
-            ax.set_ylabel('リリース Y位置', fontproperties=jp_font, fontsize=12)
+            ax.set_ylabel('リリース Z位置', fontproperties=jp_font, fontsize=12)
         else:
             ax.set_title(f'Success Rate Distribution for Stage Angle {angle}° (Interactive)', fontsize=16)
             ax.set_xlabel('Release X Position', fontsize=12)
-            ax.set_ylabel('Release Y Position', fontsize=12)
+            ax.set_ylabel('Release Z Position', fontsize=12)
         
         # カラーバー
         cbar = plt.colorbar(im, ax=ax)
@@ -1477,7 +1496,7 @@ def generate_heatmaps(df):
                     
                     if not np.isnan(success_rate):
                         # タイトルを更新してマウス位置の情報を表示
-                        title_text = f'角度: {angle}° | X: {x_pos}, Y: {y_pos} | 成功率: {success_rate:.1f}%'
+                        title_text = f'角度: {angle}° | X: {x_pos}, Z: {y_pos} | 成功率: {success_rate:.1f}%'
                         if jp_font:
                             ax.set_title(title_text, fontproperties=jp_font, fontsize=14)
                         else:
@@ -1499,7 +1518,7 @@ def generate_heatmaps(df):
     
     print(f"  - 全体ヒートマップ: {heatmap_filepath}")
     print(f"  - インタラクティブヒートマップ: {OUTPUT_DIR}/heatmap_interactive_angle_*deg.png")
-    print(f"  - ※インタラクティブウィンドウでマウスを動かすとX,Y座標と成功率が表示されます")
+    print(f"  - ※インタラクティブウィンドウでマウスを動かすとX,Z座標と成功率が表示されます")
 
 
 def run_single_condition_parallel(params_data):
@@ -2163,7 +2182,7 @@ def run_batch_mode():
     print(f"\n最高成功率の条件:")
     print(f"  角度: {best_condition['angle']}°")
     print(f"  相対角度: {best_condition['relative_angle']}°") 
-    print(f"  リリース位置: X={best_condition['release_x_offset']}, Y={best_condition['release_y_offset']}")
+    print(f"  リリース位置: X={best_condition['release_x_offset']}, Z={best_condition['release_y_offset']}")
     print(f"  成功率: {best_condition['success_rate']:.1f}%")
     print(f"  平均短冊接触: {best_condition['avg_short_contacts']:.2f}回")
     

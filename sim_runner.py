@@ -42,6 +42,8 @@ def _apply_overrides(cfg):
         main.IDEAL_NEIGHBORHOOD_RADIUS = float(cfg["ideal_neighborhood_radius"])
     if "enable_floor_fail" in cfg:
         main.ENABLE_FLOOR_FAIL_VALIDATION = bool(cfg["enable_floor_fail"])
+    if "generate_gif" in cfg:
+        main.GENERATE_GIF = bool(cfg["generate_gif"])
     if "angle_linked_offset" in cfg:
         main.ANGLE_LINKED_OFFSET = bool(cfg["angle_linked_offset"])
 
