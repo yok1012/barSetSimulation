@@ -35,10 +35,10 @@ except ImportError:
 # "BATCH":       複数条件を自動で試行し、結果をファイル出力するモード
 # "SINGLE":      単一条件の初期/最終状態を画像出力するモード
 # "BATCH_PARALLEL" 並列処理
-MODE = "INTERACTIVE"
+MODE = "BATCH"
 
 # --- 出力フォルダ ---
-OUTPUT_DIR = "results_err13"
+OUTPUT_DIR = "results_err_aws_8"
 JP_FONT_FILENAME = "ipaexg.ttf"
 
 # --- シミュレーション基本設定 ---
@@ -63,6 +63,18 @@ GIF_FPS = 30              # GIF の再生フレームレート（GIF_FRAME_STEP=
 GIF_MAX_WIDTH = 800       # GIF の最大横幅(px)。これを超える場合は縮小して書き出す
 GIF_COLORS = 96           # GIF パレットの色数（少ないほどファイルが軽い）
 
+# --- ヒートマップの文字サイズ（ここを変えると一括で調整できる）---
+# もっと大きくしたいときは HEATMAP_FONT_SCALE を上げる（例: 1.3 で全体が 1.3 倍）。
+# 個別要素だけ変えたいときは各サイズを直接編集する。
+HEATMAP_FONT_SCALE = 1.0       # 全体倍率（すべての文字サイズに掛かる）
+HEATMAP_TITLE_SIZE = 16        # タイトル
+HEATMAP_LABEL_SIZE = 16        # 軸ラベル（リリースX/Z位置）
+HEATMAP_TICK_SIZE = 16         # 軸目盛りの数値
+HEATMAP_CBAR_LABEL_SIZE = 16   # カラーバーのラベル（成功率)
+HEATMAP_CBAR_TICK_SIZE = 16    # カラーバーの目盛り
+HEATMAP_CELL_SIZE = 16         # 各セルに表示する成功率の数値
+HEATMAP_OVERLAY_SIZE = 16      # バー寸法・中心・斜面/壁面などの注記
+
 # --- リリースオフセットの座標系 ---
 # オフセットの原点は「理想位置」。offset=(0,0) でリリース位置＝理想位置になる。
 # False: 画面固定軸。実X = ideal_x + Xオフセット, 実Y = ideal_y - Yオフセット
@@ -70,19 +82,19 @@ GIF_COLORS = 96           # GIF パレットの色数（少ないほどファイ
 ANGLE_LINKED_OFFSET = False
 
 # --- 判定閾値設定 ---
-CONTACT_COUNT_THRESHOLD = 5   # 短冊方向の接触回数閾値（これ以上でNG判定対象）
-CONTACT_DIFF_THRESHOLD = 1.0     # 接触位置の累積差分閾値（μm）（これを超えたらNG）
-# 理想位置近傍での短冊接触はカウントから除外する。
-# バー重心が理想位置からこの半径(μm)以内のときの接触は「正常な収まり」とみなし無視する。
+CONTACT_COUNT_THRESHOLD = 1  # 端面（短手面）接触の回数閾値。理想位置近傍を除いた端面接触がこの回数以上でNG
+CONTACT_DIFF_THRESHOLD = 1.0     # （旧仕様：接触位置の累積差分閾値。現在はNG判定には未使用）
+# 理想位置近傍での端面接触は「正常な収まり（角接触）」とみなしNGカウントから除外する。
+# バー重心が理想位置からこの半径(μm)以内のときの端面接触は無視する。
 IDEAL_NEIGHBORHOOD_RADIUS = 10.0
 
 # --- 各モード用の設定 ---
-BATCH_PARAM_RANGES = {'angle': range(20, 31, 10), 'release_x_offset': range(-300, 300, 5),
-                      'release_y_offset': range(400, 1000, 5), 'relative_angle': [0]}  # 相対角度は固定
+BATCH_PARAM_RANGES = {'angle': range(10, 31, 10), 'release_x_offset': range(-100, 300, 5),
+                      'release_y_offset': range(-10, 390, 5), 'relative_angle': [0]}  # 相対角度は固定
 # バラツキ設定：X, Y位置、相対角度の標準偏差（1 pixel = 1 μm）
-RELEASE_X_VARIABILITY = 0  # X位置のバラツキ 20μm
-RELEASE_Y_VARIABILITY = 0  # Y位置のバラツキ 20μm
-RELATIVE_ANGLE_VARIABILITY = 0.0  # 相対角度のバラツキ（度）
+RELEASE_X_VARIABILITY = 20  # X位置のバラツキ 20μm
+RELEASE_Y_VARIABILITY = 20  # Y位置のバラツキ 20μm
+RELATIVE_ANGLE_VARIABILITY = 1.0  # 相対角度のバラツキ（度）
 NUM_TRIALS_PER_CONDITION = 10  # 各条件での試行回数
 SINGLE_CONDITION_PARAMS = {'angle': 30, 'release_x_offset': 0, 'release_y_offset': 600, 'relative_angle': 0}
 
@@ -1051,7 +1063,7 @@ def run_single_condition_mode():
         # short_side（短冊面が接触）
         contact_stats["short"] += 1
         contact_stats["short_" + surface] += 1
-        # 理想位置近傍の接触は除外（他モードと同じ扱い）
+        # 理想位置近傍の接触は「正常な収まり」として除外（他モードと同じ扱い）
         if is_near_ideal_position(bar.body.position, stage_angle_rad):
             contact_stats["excluded_near_ideal"] += 1
             return True
@@ -1332,6 +1344,7 @@ def generate_heatmaps(df):
     """
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
+    from matplotlib.patches import Polygon
     from matplotlib.font_manager import FontProperties
     
     # 日本語フォントの設定
@@ -1339,7 +1352,230 @@ def generate_heatmaps(df):
         jp_font = FontProperties(fname=JP_FONT_FILENAME)
     except:
         jp_font = None
-    
+
+    # 文字サイズ（先頭の HEATMAP_* 定数 × 全体倍率 HEATMAP_FONT_SCALE）
+    def _fs(base):
+        return max(1, int(round(base * HEATMAP_FONT_SCALE)))
+    FS_TITLE = _fs(HEATMAP_TITLE_SIZE)
+    FS_LABEL = _fs(HEATMAP_LABEL_SIZE)
+    FS_TICK = _fs(HEATMAP_TICK_SIZE)
+    FS_CBAR_LABEL = _fs(HEATMAP_CBAR_LABEL_SIZE)
+    FS_CBAR_TICK = _fs(HEATMAP_CBAR_TICK_SIZE)
+    FS_CELL = _fs(HEATMAP_CELL_SIZE)
+    FS_OVERLAY = _fs(HEATMAP_OVERLAY_SIZE)
+
+    def value_to_heatmap_index(values, target):
+        """実オフセット値を imshow のセル座標へ線形変換する。"""
+        vals = [float(v) for v in values]
+        if not vals or target < vals[0] or target > vals[-1]:
+            return None
+        if len(vals) == 1:
+            return 0 if vals[0] == target else None
+        for i, val in enumerate(vals):
+            if val == target:
+                return float(i)
+        for i in range(len(vals) - 1):
+            left, right = vals[i], vals[i + 1]
+            if left <= target <= right and right != left:
+                return i + (target - left) / (right - left)
+        return None
+
+    def draw_ideal_bar_overlay(ax, x_positions, y_positions, angle_deg):
+        """
+        ヒートマップ軸は理想位置原点のリリースオフセット。
+        そのため理想リリース位置は (X=0, Z=0) として点線で重ねる。
+        """
+        def map_point(x, y):
+            ix = value_to_heatmap_index(x_positions, x)
+            iy = value_to_heatmap_index(y_positions, y)
+            if ix is None or iy is None:
+                return None
+            return ix, iy
+
+        def draw_dimension(start, end, label, label_offset=(0.15, 0.15)):
+            p0 = map_point(*start)
+            p1 = map_point(*end)
+            if p0 is None or p1 is None:
+                return False
+            ax.annotate(
+                "",
+                xy=p1,
+                xytext=p0,
+                arrowprops=dict(
+                    arrowstyle="<->",
+                    color="black",
+                    linestyle="--",
+                    linewidth=1.4,
+                    shrinkA=0,
+                    shrinkB=0,
+                ),
+            )
+            mx = (p0[0] + p1[0]) / 2 + label_offset[0]
+            my = (p0[1] + p1[1]) / 2 + label_offset[1]
+            ax.text(
+                mx, my, label,
+                color="black", fontsize=FS_OVERLAY,
+                bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"),
+                fontproperties=jp_font,
+            )
+            return True
+
+        cx = value_to_heatmap_index(x_positions, 0.0)
+        cy = value_to_heatmap_index(y_positions, 0.0)
+        if cx is None or cy is None:
+            ax.text(
+                0.02, 0.98, "理想位置(0,0)は範囲外",
+                transform=ax.transAxes,
+                ha="left", va="top",
+                color="black", fontsize=FS_OVERLAY,
+                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                fontproperties=jp_font,
+            )
+            return
+
+        ax.axvline(cx, color="black", linestyle=":", linewidth=1.4, alpha=0.9)
+        ax.axhline(cy, color="black", linestyle=":", linewidth=1.4, alpha=0.9)
+        ax.plot(cx, cy, marker="+", color="black", markersize=11, markeredgewidth=2)
+
+        bar_w = BAR_WIDTH * PPM
+        bar_h = BAR_HEIGHT * PPM
+        ax.text(
+            0.02, 0.98,
+            f"理想バー中心: X=0, Z=0\n寸法: 長さ {bar_h:.0f} μm / 幅 {bar_w:.0f} μm",
+            transform=ax.transAxes,
+            ha="left", va="top",
+            color="black", fontsize=FS_OVERLAY,
+            bbox=dict(facecolor="white", alpha=0.78, edgecolor="none"),
+            fontproperties=jp_font,
+        )
+        # オフセット座標はZ正方向が上。画面座標系の角度を反転して、ヒートマップ上の向きに合わせる。
+        bar_angle = math.radians(angle_deg)
+        verts_offset = get_rect_vertices((0.0, 0.0), (bar_w, bar_h), bar_angle)
+        verts_idx = []
+        for vx, vy in verts_offset:
+            ix = value_to_heatmap_index(x_positions, vx)
+            iy = value_to_heatmap_index(y_positions, vy)
+            if ix is None or iy is None:
+                verts_idx = []
+                break
+            verts_idx.append((ix, iy))
+        if verts_idx:
+            ax.add_patch(Polygon(
+                verts_idx,
+                closed=True,
+                fill=False,
+                edgecolor="black",
+                linestyle="--",
+                linewidth=2.0,
+                alpha=0.95,
+            ))
+        cos_a, sin_a = math.cos(bar_angle), math.sin(bar_angle)
+        width_axis = (cos_a, sin_a)
+        length_axis = (-sin_a, cos_a)
+        length_start = (-length_axis[0] * bar_h / 2, -length_axis[1] * bar_h / 2)
+        length_end = (length_axis[0] * bar_h / 2, length_axis[1] * bar_h / 2)
+        width_start = (-width_axis[0] * bar_w / 2, -width_axis[1] * bar_w / 2)
+        width_end = (width_axis[0] * bar_w / 2, width_axis[1] * bar_w / 2)
+        draw_dimension(length_start, length_end, f"長さ {bar_h:.0f} μm")
+        draw_dimension(width_start, width_end, f"幅 {bar_w:.0f} μm", label_offset=(0.15, -0.35))
+        ax.text(
+            cx + 0.15, cy + 0.15, "中心(0,0)",
+            color="black", fontsize=FS_OVERLAY,
+            bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+            fontproperties=jp_font,
+        )
+
+    def draw_stage_lines(ax, x_positions, y_positions, angle_deg):
+        """斜面と壁面の向きを、ヒートマップ中心（理想位置＝オフセット原点 (0,0)）を通る
+        点線として重ねる。実際の斜面/壁は中心から離れた位置（壁≈幅の半分、斜面≈長さの半分）
+        にあるが、向きの基準が分かるよう中心へ平行移動して表示する。"""
+        stage_angle_rad = math.radians(-angle_deg)
+
+        def world_dir_to_offset(dwx, dwy):
+            """世界座標の方向ベクトルをオフセット座標の方向へ変換する（compute_release_pos の線形部）。"""
+            if ANGLE_LINKED_OFFSET:
+                cos_t, sin_t = math.cos(stage_angle_rad), math.sin(stage_angle_rad)
+                return dwx * cos_t + dwy * sin_t, dwx * sin_t - dwy * cos_t
+            return dwx, -dwy
+
+        x_vals = [float(v) for v in x_positions]
+        y_vals = [float(v) for v in y_positions]
+        if len(x_vals) < 2 or len(y_vals) < 2:
+            return
+        xmin, xmax = x_vals[0], x_vals[-1]
+        ymin, ymax = y_vals[0], y_vals[-1]
+        # 中心（オフセット原点）が表示範囲内にあるときだけ基準線を描く
+        if not (xmin <= 0 <= xmax and ymin <= 0 <= ymax):
+            return
+
+        def clip(x0, y0, x1, y1):
+            """線分を可視範囲 [xmin,xmax]x[ymin,ymax] に Liang-Barsky でクリップ。"""
+            dx, dy = x1 - x0, y1 - y0
+            p = [-dx, dx, -dy, dy]
+            q = [x0 - xmin, xmax - x0, y0 - ymin, ymax - y0]
+            u0, u1 = 0.0, 1.0
+            for pi, qi in zip(p, q):
+                if pi == 0:
+                    if qi < 0:
+                        return None
+                else:
+                    t = qi / pi
+                    if pi < 0:
+                        if t > u1:
+                            return None
+                        u0 = max(u0, t)
+                    else:
+                        if t < u0:
+                            return None
+                        u1 = min(u1, t)
+            if u0 > u1:
+                return None
+            return x0 + u0 * dx, y0 + u0 * dy, x0 + u1 * dx, y0 + u1 * dy
+
+        def clamp(v, lo, hi):
+            return max(lo, min(hi, v))
+
+        L = 100000.0  # 中心(0,0)を通る直線を十分長く延ばしてからクリップする
+        slope_dir = world_dir_to_offset(math.cos(stage_angle_rad), math.sin(stage_angle_rad))
+        wall_dir = world_dir_to_offset(math.cos(stage_angle_rad - math.pi / 2),
+                                       math.sin(stage_angle_rad - math.pi / 2))
+        lines = [
+            ("斜面", slope_dir[0], slope_dir[1], "saddlebrown"),
+            ("壁面", wall_dir[0], wall_dir[1], "navy"),
+        ]
+        for label, ux, uy, color in lines:
+            # 中心(0,0)を通る直線として ±L 延長
+            clipped = clip(-ux * L, -uy * L, ux * L, uy * L)
+            if clipped is None:
+                continue
+            cx0, cy0, cx1, cy1 = clipped
+            ix0 = value_to_heatmap_index(x_positions, clamp(cx0, xmin, xmax))
+            iy0 = value_to_heatmap_index(y_positions, clamp(cy0, ymin, ymax))
+            ix1 = value_to_heatmap_index(x_positions, clamp(cx1, xmin, xmax))
+            iy1 = value_to_heatmap_index(y_positions, clamp(cy1, ymin, ymax))
+            if None in (ix0, iy0, ix1, iy1):
+                continue
+            ax.plot([ix0, ix1], [iy0, iy1], color=color, linestyle="--",
+                    linewidth=1.6, alpha=0.9, zorder=5)
+            # ラベルは中心を避け、線の端寄り(85%)に置く
+            mx = ix0 + 0.85 * (ix1 - ix0)
+            my = iy0 + 0.85 * (iy1 - iy0)
+            ax.text(mx, my, label, color=color, fontsize=FS_OVERLAY, zorder=6,
+                    bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
+                    fontproperties=jp_font)
+
+    def set_thinned_ticks(ax, x_positions, y_positions, max_ticks=12):
+        """セル数が多いと軸ラベルが潰れるため、最大 max_ticks 本程度に間引いて表示する。"""
+        nx, ny = len(x_positions), len(y_positions)
+        sx = max(1, int(math.ceil(nx / float(max_ticks))))
+        sy = max(1, int(math.ceil(ny / float(max_ticks))))
+        xt = list(range(0, nx, sx))
+        yt = list(range(0, ny, sy))
+        ax.set_xticks(xt)
+        ax.set_yticks(yt)
+        ax.set_xticklabels([x_positions[i] for i in xt], rotation=45, fontsize=FS_TICK)
+        ax.set_yticklabels([y_positions[i] for i in yt], fontsize=FS_TICK)
+
     # 角度のユニーク値を取得
     angles = sorted(df['angle'].unique())
     
@@ -1386,34 +1622,34 @@ def generate_heatmaps(df):
                       aspect='auto', origin='lower')
         
         # 軸の設定
-        ax.set_xticks(range(len(x_positions)))
-        ax.set_yticks(range(len(y_positions)))
-        ax.set_xticklabels(x_positions, rotation=45)
-        ax.set_yticklabels(y_positions)
-        
+        set_thinned_ticks(ax, x_positions, y_positions)
+        draw_ideal_bar_overlay(ax, x_positions, y_positions, angle)
+        draw_stage_lines(ax, x_positions, y_positions, angle)
+
         # 成功率の値を各セルに表示
         for i in range(len(y_positions)):
             for j in range(len(x_positions)):
                 if not np.isnan(success_matrix[i, j]):
                     text = ax.text(j, i, f'{success_matrix[i, j]:.0f}',
-                                 ha="center", va="center", color="black", fontsize=8)
+                                 ha="center", va="center", color="black", fontsize=FS_CELL)
         
         # タイトルとラベル
         if jp_font:
-            ax.set_title(f'ステージ角度: {angle}°', fontproperties=jp_font, fontsize=14)
-            ax.set_xlabel('リリース X位置', fontproperties=jp_font)
-            ax.set_ylabel('リリース Z位置', fontproperties=jp_font)
+            ax.set_title(f'ステージ角度: {angle}°', fontproperties=jp_font, fontsize=FS_TITLE)
+            ax.set_xlabel('リリース X位置 (μm)', fontproperties=jp_font, fontsize=FS_LABEL)
+            ax.set_ylabel('リリース Z位置 (μm)', fontproperties=jp_font, fontsize=FS_LABEL)
         else:
-            ax.set_title(f'Stage Angle: {angle}°', fontsize=14)
-            ax.set_xlabel('Release X Position')
-            ax.set_ylabel('Release Z Position')
-        
+            ax.set_title(f'Stage Angle: {angle}°', fontsize=FS_TITLE)
+            ax.set_xlabel('Release X Position (μm)', fontsize=FS_LABEL)
+            ax.set_ylabel('Release Z Position (μm)', fontsize=FS_LABEL)
+
         # カラーバーを追加
         cbar = plt.colorbar(im, ax=ax)
+        cbar.ax.tick_params(labelsize=FS_CBAR_TICK)
         if jp_font:
-            cbar.set_label('成功率 (%)', fontproperties=jp_font)
+            cbar.set_label('成功率 (%)', fontproperties=jp_font, fontsize=FS_CBAR_LABEL)
         else:
-            cbar.set_label('Success Rate (%)')
+            cbar.set_label('Success Rate (%)', fontsize=FS_CBAR_LABEL)
     
     # 余分な軸を非表示
     for idx in range(n_angles, n_rows * n_cols):
@@ -1458,27 +1694,27 @@ def generate_heatmaps(df):
                       aspect='auto', origin='lower')
         
         # 軸の設定
-        ax.set_xticks(range(len(x_positions)))
-        ax.set_yticks(range(len(y_positions)))
-        ax.set_xticklabels(x_positions, rotation=45)
-        ax.set_yticklabels(y_positions)
-        
+        set_thinned_ticks(ax, x_positions, y_positions)
+        draw_ideal_bar_overlay(ax, x_positions, y_positions, angle)
+        draw_stage_lines(ax, x_positions, y_positions, angle)
+
         # タイトルとラベル
         if jp_font:
-            ax.set_title(f'ステージ角度 {angle}° の成功率分布（インタラクティブ）', fontproperties=jp_font, fontsize=16)
-            ax.set_xlabel('リリース X位置', fontproperties=jp_font, fontsize=12)
-            ax.set_ylabel('リリース Z位置', fontproperties=jp_font, fontsize=12)
+            ax.set_title(f'ステージ角度 {angle}° の成功率分布（インタラクティブ）', fontproperties=jp_font, fontsize=FS_TITLE)
+            ax.set_xlabel('リリース X位置 (μm)', fontproperties=jp_font, fontsize=FS_LABEL)
+            ax.set_ylabel('リリース Z位置 (μm)', fontproperties=jp_font, fontsize=FS_LABEL)
         else:
-            ax.set_title(f'Success Rate Distribution for Stage Angle {angle}° (Interactive)', fontsize=16)
-            ax.set_xlabel('Release X Position', fontsize=12)
-            ax.set_ylabel('Release Z Position', fontsize=12)
-        
+            ax.set_title(f'Success Rate Distribution for Stage Angle {angle}° (Interactive)', fontsize=FS_TITLE)
+            ax.set_xlabel('Release X Position (μm)', fontsize=FS_LABEL)
+            ax.set_ylabel('Release Z Position (μm)', fontsize=FS_LABEL)
+
         # カラーバー
         cbar = plt.colorbar(im, ax=ax)
+        cbar.ax.tick_params(labelsize=FS_CBAR_TICK)
         if jp_font:
-            cbar.set_label('成功率 (%)', fontproperties=jp_font, fontsize=12)
+            cbar.set_label('成功率 (%)', fontproperties=jp_font, fontsize=FS_CBAR_LABEL)
         else:
-            cbar.set_label('Success Rate (%)', fontsize=12)
+            cbar.set_label('Success Rate (%)', fontsize=FS_CBAR_LABEL)
         
         # インタラクティブ機能：マウスカーソルで値を表示
         def on_hover(event):
@@ -1498,9 +1734,9 @@ def generate_heatmaps(df):
                         # タイトルを更新してマウス位置の情報を表示
                         title_text = f'角度: {angle}° | X: {x_pos}, Z: {y_pos} | 成功率: {success_rate:.1f}%'
                         if jp_font:
-                            ax.set_title(title_text, fontproperties=jp_font, fontsize=14)
+                            ax.set_title(title_text, fontproperties=jp_font, fontsize=FS_TITLE)
                         else:
-                            ax.set_title(title_text, fontsize=14)
+                            ax.set_title(title_text, fontsize=FS_TITLE)
                         fig.canvas.draw_idle()
         
         # マウスイベントを接続
@@ -1587,19 +1823,14 @@ def run_single_condition_parallel(params_data):
                         contact_side = check_bar_contact_side(bar.body, None, contact_point, arbiter.contact_point_set.normal)
                         
                         if contact_side in ["short_side", "both"]:
-                            # 理想位置近傍での接触は「正常な収まり」とみなしカウントから除外
+                            # 理想位置近傍での接触は「正常な収まり（角接触）」とみなしカウントから除外
                             if is_near_ideal_position(bar.body.position, stage_angle_rad):
                                 return True
-                            diff = 0.0
-                            if contact_history:
-                                _, last_point = contact_history[-1]
-                                diff = math.sqrt((contact_point[0] - last_point[0])**2 + (contact_point[1] - last_point[1])**2)
-
-                            accumulated_contact_diff += diff
+                            # 近傍を除いた端面接触の回数をカウント
                             short_side_contact_count += 1
-                            contact_history.append((0, contact_point)) # Time is not strictly needed for logic now
-
-                            if short_side_contact_count >= CONTACT_COUNT_THRESHOLD and accumulated_contact_diff > CONTACT_DIFF_THRESHOLD:
+                            contact_history.append((0, contact_point))
+                            # 端面に CONTACT_COUNT_THRESHOLD 回以上触れたらNG（接触位置の移動量は不問）
+                            if short_side_contact_count >= CONTACT_COUNT_THRESHOLD:
                                 wall_hit_flag[0] = True
                 except:
                     pass
@@ -1639,9 +1870,12 @@ def run_single_condition_parallel(params_data):
                 fail_reason = 'multiple_short_contacts'
             
             is_success, reason = check_success(bar, slope_seg, wall_seg, stage_angle_rad, floor_hit_flag[0])
+            # 短冊接触の制限を成功判定にも反映する（閾値超過なら強制的にNG）
+            if wall_hit_flag[0]:
+                is_success = False
             if not is_success and not fail_reason:
                 fail_reason = reason
-            
+
             trial_results.append({
                 'trial': trial_num,
                 'success': is_success,
@@ -1974,22 +2208,14 @@ def run_batch_mode():
                         contact_side = check_bar_contact_side(wall_handler_data["bar_body"], None, contact_point, arbiter.contact_point_set.normal)
                         
                         if contact_side in ["short_side", "both"]:
-                            # 理想位置近傍での接触は「正常な収まり」とみなしカウントから除外
+                            # 理想位置近傍での接触は「正常な収まり（角接触）」とみなしカウントから除外
                             if is_near_ideal_position(wall_handler_data["bar_body"].position, stage_angle_rad):
                                 return True
-                            # 以前の接触点との距離を計算
-                            diff = 0.0
-                            if contact_history:
-                                last_time, last_point = contact_history[-1]
-                                diff = math.sqrt((contact_point[0] - last_point[0])**2 + (contact_point[1] - last_point[1])**2)
-
-                            # 差分を積算
-                            accumulated_contact_diff += diff
-
+                            # 近傍を除いた端面接触の回数をカウント
                             short_side_contact_count += 1
                             contact_history.append((current_time, contact_point))
-
-                            if short_side_contact_count >= CONTACT_COUNT_THRESHOLD and accumulated_contact_diff > CONTACT_DIFF_THRESHOLD:
+                            # 端面に CONTACT_COUNT_THRESHOLD 回以上触れたらNG（接触位置の移動量は不問）
+                            if short_side_contact_count >= CONTACT_COUNT_THRESHOLD:
                                 wall_hit_flag[0] = True
                 except:
                     # 衝突点情報が取得できない場合はスキップ
@@ -2089,9 +2315,12 @@ def run_batch_mode():
                 fail_reason = 'multiple_short_contacts'
             
             is_success, reason = check_success(bar, slope_seg, wall_seg, stage_angle_rad, floor_hit_flag[0])
+            # 短冊接触の制限を成功判定にも反映する（閾値超過なら強制的にNG）
+            if wall_hit_flag[0]:
+                is_success = False
             if not is_success and not fail_reason:
                 fail_reason = reason
-            
+
             trial_results.append({
                 'trial': trial_num + 1,
                 'success': is_success,

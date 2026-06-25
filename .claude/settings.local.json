@@ -5,7 +5,11 @@
       "Bash(pip3 install:*)",
       "WebSearch",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(python3 -m py_compile main.py)",
+      "Bash(.venv/bin/python *)",
+      "Bash(SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy .venv/bin/python sim_runner.py /tmp/batch_test.json)",
+      "Bash(python3 -)"
     ],
     "deny": []
   }

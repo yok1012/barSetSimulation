@@ -107,10 +107,6 @@ pip install pygame pymunk numpy pandas matplotlib seaborn psutil streamlit Pillo
 
 まずStreamlitではなく、計算本体が動くか確認します。
 
-```bash
-python main.py
-```
-
 注意: AWS上ではpygameの別ウィンドウを使う `INTERACTIVE` モードは基本的に使いません。`SINGLE`、`BATCH`、`BATCH_PARALLEL` の利用を推奨します。
 
 ## 6. StreamlitをAWS上で起動
