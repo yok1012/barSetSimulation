@@ -9,7 +9,26 @@
       "Bash(python3 -m py_compile main.py)",
       "Bash(.venv/bin/python *)",
       "Bash(SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy .venv/bin/python sim_runner.py /tmp/batch_test.json)",
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(findstr /C:\"GIF\" /C:\"結果\" /C:\"DEVIATION\" /C:\"軌跡\" /C:\"done\" /C:\"sim_runner\")",
+      "Bash(python sim_runner.py \"C:\\\\Users\\\\255396\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\zcheck_cfg.json\")",
+      "Bash(echo \"exit=$?\")",
+      "Bash(Select-String -Pattern \"警告|理想位置|最終位置|ズレ|総合判定|JUDGE|SHORT_|LONG_|DEVIATION|エラー|Error|Traceback\")",
+      "PowerShell(python _test_heatmap_overlay.py)",
+      "PowerShell(python _test_release_force.py)",
+      "PowerShell(Out-File *)",
+      "PowerShell(python -m py_compile main.py sim_runner.py streamlit_app.py; if \\($?\\) { \"compile OK\" })",
+      "PowerShell(python _test_heatmap_overlay.py default; python _test_heatmap_overlay.py wide)",
+      "PowerShell(python _test_heatmap_overlay.py wide)",
+      "PowerShell(python -m py_compile streamlit_app.py; if \\($?\\) { \"compile OK\" })",
+      "PowerShell(python _test_bg_run.py)",
+      "PowerShell(python _test_ticks.py)",
+      "PowerShell(python _test_preview.py 2>&1 | Select-Object -Last 3)",
+      "PowerShell(python _test_preview.py 2>&1 | Select-Object -Last 1)",
+      "PowerShell(python _test_preview.py 2>&1 | Select-Object -Last 1; python _test_ticks.py 2>&1 | Select-Object -Last 1)",
+      "Bash(git push *)",
+      "Bash(git fetch *)",
+      "Bash(git rebase *)"
     ],
     "deny": []
   }

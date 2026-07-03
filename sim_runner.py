@@ -42,10 +42,26 @@ def _apply_overrides(cfg):
         main.IDEAL_NEIGHBORHOOD_RADIUS = float(cfg["ideal_neighborhood_radius"])
     if "enable_floor_fail" in cfg:
         main.ENABLE_FLOOR_FAIL_VALIDATION = bool(cfg["enable_floor_fail"])
+    if "enable_no_contact_fail" in cfg:
+        main.ENABLE_NO_CONTACT_FAIL = bool(cfg["enable_no_contact_fail"])
     if "generate_gif" in cfg:
         main.GENERATE_GIF = bool(cfg["generate_gif"])
     if "angle_linked_offset" in cfg:
         main.ANGLE_LINKED_OFFSET = bool(cfg["angle_linked_offset"])
+
+    rf = cfg.get("release_force")
+    if rf:
+        main.RELEASE_FORCE_ACCEL = float(rf.get("accel", main.RELEASE_FORCE_ACCEL))
+        main.RELEASE_FORCE_ANGLE_DEG = float(
+            rf.get("angle_deg", main.RELEASE_FORCE_ANGLE_DEG)
+        )
+        main.RELEASE_FORCE_DURATION = float(
+            rf.get("duration", main.RELEASE_FORCE_DURATION)
+        )
+
+    ho = cfg.get("heatmap_overlay")
+    if ho:
+        main.HEATMAP_OVERLAY_OPTIONS.update(ho)
 
     var = cfg.get("variability")
     if var:

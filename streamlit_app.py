@@ -15,14 +15,21 @@ import sys
 import json
 import math
 import glob
+import time
 import tempfile
 import subprocess
 
 import streamlit as st
 
+try:
+    import psutil  # プロセス生存確認・停止用（main.py と同じく任意依存）
+except ImportError:
+    psutil = None
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNNER = os.path.join(BASE_DIR, "sim_runner.py")
 SETTINGS_FILE = os.path.join(BASE_DIR, ".streamlit_ui_settings.json")
+RUN_STATE_FILE = os.path.join(BASE_DIR, ".barsim_run_state.json")
 
 st.set_page_config(page_title="バーセットシミュレーション", layout="wide")
 
@@ -52,6 +59,11 @@ def _rect_vertices(pos, size, angle):
     for dw, dh in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)):
         pts.append((pos[0] + dw * cos_a - dh * sin_a, pos[1] + dw * sin_a + dh * cos_a))
     return pts
+
+
+def _bar_lower_left(pos, size, angle):
+    """バー中心・寸法・角度から、ローカル左下端の座標を返す。"""
+    return _rect_vertices(pos, size, angle)[3]
 
 
 def calc_ideal_position(angle_deg):
@@ -90,7 +102,8 @@ def _setup_preview_font():
     return None
 
 
-def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0):
+def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
+                         force_accel=0.0, force_angle_deg=0.0):
     """台座・理想位置・落下開始位置を図示した matplotlib Figure と座標を返す。"""
     _setup_preview_font()
     import matplotlib.pyplot as plt
@@ -102,6 +115,7 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0):
     # 落下開始時のバー姿勢（main: actual_release_angle = stage_angle + relative_angle）
     release_angle_rad = stage_angle_rad + math.radians(-rel_angle_deg)
     bar_verts = _rect_vertices((rel_x, rel_y), (BAR_WIDTH_UM, BAR_HEIGHT_UM), release_angle_rad)
+    release_lower_left = _bar_lower_left((rel_x, rel_y), (BAR_WIDTH_UM, BAR_HEIGHT_UM), release_angle_rad)
 
     slope_end = (BASE_X + SLOPE_LENGTH * math.cos(stage_angle_rad),
                  BASE_Y + SLOPE_LENGTH * math.sin(stage_angle_rad))
@@ -132,24 +146,36 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0):
         ax.text(ideal_x + d[0] * (axis_len + 60), ideal_y + d[1] * (axis_len + 60),
                 lbl, color=color, fontsize=9, ha="center", va="center", bbox=bbox)
 
-    # 理想位置 → 落下開始位置（オフセット量）
-    if (rel_x, rel_y) != (ideal_x, ideal_y):
-        ax.plot([ideal_x, rel_x], [ideal_y, rel_y], color="orange", ls="--", lw=1.3, zorder=3)
+    # 理想位置 → 落下開始位置（バー左下端）の参照線
+    if release_lower_left != (ideal_x, ideal_y):
+        ax.plot([ideal_x, release_lower_left[0]], [ideal_y, release_lower_left[1]],
+                color="orange", ls="--", lw=1.3, zorder=3)
 
     # 落下開始時のバーの輪郭を点線で図示
     ax.add_patch(Polygon(bar_verts, closed=True, fill=False, ls="--", lw=1.5,
                          ec="#1e90ff", zorder=4, label="バー(落下開始姿勢)"))
 
+    # 脱着力の方向を矢印で図示（0°=+X(右) / 90°=+Z(上)。画面座標は Z↓ なので -sin）
+    if force_accel > 0:
+        frad = math.radians(force_angle_deg)
+        fdir = (math.cos(frad), -math.sin(frad))
+        flen = max(300, IDEAL_RADIUS * 0.6)
+        ax.annotate("", xy=(rel_x + fdir[0] * flen, rel_y + fdir[1] * flen),
+                    xytext=(rel_x, rel_y),
+                    arrowprops=dict(arrowstyle="-|>", color="crimson", lw=2.0))
+        ax.plot([], [], color="crimson", lw=2.0,
+                label=f"脱着力F ({force_accel:.0f} μm/s² / {force_angle_deg:.0f}°)")
+
     # マーカー（凡例にまとめ、図中への文字重なりを避ける）
     ax.scatter([BASE_X], [BASE_Y], c="red", marker="P", s=140, zorder=5, label="台座(BASE)")
     ax.scatter([ideal_x], [ideal_y], c="green", marker="+", s=240, linewidths=2.5,
                zorder=5, label="理想位置")
-    ax.scatter([rel_x], [rel_y], facecolors="magenta", edgecolors="purple",
-               marker="o", s=110, zorder=6, label="落下開始位置")
+    ax.scatter([release_lower_left[0]], [release_lower_left[1]], facecolors="magenta", edgecolors="purple",
+               marker="o", s=110, zorder=6, label="落下開始位置(バー左下端)")
 
     # 表示範囲（バー輪郭を含む全点を含めて少し余白）
-    xs = [BASE_X, slope_end[0], wall_end[0], ideal_x, rel_x] + [v[0] for v in bar_verts]
-    ys = [BASE_Y, slope_end[1], wall_end[1], ideal_y, rel_y] + [v[1] for v in bar_verts]
+    xs = [BASE_X, slope_end[0], wall_end[0], ideal_x, release_lower_left[0]] + [v[0] for v in bar_verts]
+    ys = [BASE_Y, slope_end[1], wall_end[1], ideal_y, release_lower_left[1]] + [v[1] for v in bar_verts]
     pad = max(200, (max(xs) - min(xs)) * 0.15, (max(ys) - min(ys)) * 0.15)
     ax.set_xlim(min(xs) - pad, max(xs) + pad)
     ax.set_ylim(min(ys) - pad, max(ys) + pad)
@@ -168,9 +194,49 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0):
     coords = {
         "base": (float(BASE_X), float(BASE_Y)),
         "ideal": (ideal_x, ideal_y),
-        "release": (rel_x, rel_y),
+        "release": release_lower_left,
+        "release_center": (rel_x, rel_y),
     }
     return fig, coords
+
+
+def build_batch_heatmap_preview(angle_deg, x_positions, y_positions,
+                                angle_linked, overlay_opts):
+    """BATCHヒートマップの見え方（軸目盛り・オーバーレイ）を実行前に確認するダミー図。
+
+    本番出力（main.generate_heatmaps）と同じ heatmap_render を使って描画する
+    ため、目盛りの間引きやオーバーレイの表示はそのまま実行結果に反映される。
+    成功率の値はダミー（中央ほど高い山型の分布）。
+    """
+    _setup_preview_font()
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import heatmap_render
+
+    xs = np.asarray(x_positions, dtype=float)
+    zs = np.asarray(y_positions, dtype=float)
+    gx = (xs - xs.mean()) / max(1.0, (xs.max() - xs.min()) / 2)
+    gz = (zs - zs.mean()) / max(1.0, (zs.max() - zs.min()) / 2)
+    matrix = 100.0 * np.exp(-(gx[None, :] ** 2 + gz[:, None] ** 2))
+
+    fig, ax = plt.subplots(figsize=(8, 6.5))
+    im = ax.imshow(matrix, cmap="RdYlGn", vmin=0, vmax=100,
+                   aspect="auto", origin="lower")
+    heatmap_render.set_heatmap_ticks(ax, x_positions, y_positions,
+                                     overlay_opts.get("max_ticks", 12))
+    heatmap_render.draw_overlays(ax, x_positions, y_positions, angle_deg,
+                                 angle_linked, None, overlay_opts)
+    if heatmap_render.cell_values_visible(x_positions, y_positions, overlay_opts):
+        for i in range(len(zs)):
+            for j in range(len(xs)):
+                ax.text(j, i, f"{matrix[i, j]:.0f}", ha="center", va="center",
+                        color="black", fontsize=8)
+    ax.set_title(f"表示プレビュー（角度 {angle_deg}° / 成功率はダミー値）")
+    ax.set_xlabel("リリース X位置")
+    ax.set_ylabel("リリース Z位置")
+    fig.colorbar(im, ax=ax, label="成功率 (%)")
+    fig.tight_layout()
+    return fig
 
 
 # --------------------------------------------------------------------------
@@ -215,28 +281,171 @@ def write_config(cfg):
     return path
 
 
-def run_blocking(cfg):
-    """完了まで待つモード(SINGLE/BATCH/BATCH_PARALLEL)を実行し、ログをUIへ流す。"""
+# --------------------------------------------------------------------------
+# バックグラウンド実行（WebSocket セッションと独立）
+#   run_blocking 方式（完了までスクリプト実行を占有しログを逐次送信）は、
+#   長時間実行中にブラウザ側の WebSocket が切断されるとセッションごと停止する
+#   （"Unexpected ASGI message 'websocket.send', after sending 'websocket.close'"）。
+#   そのため実行はログファイルへ出力する別プロセスとして起動し、UI は状態
+#   ファイル＋ログファイルをポーリング表示する。切断・再読み込みが起きても
+#   シミュレーションは継続し、ページを開き直せば進捗・結果に再接続できる。
+# --------------------------------------------------------------------------
+def _save_run_state(info):
+    with open(RUN_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+
+
+def _load_run_state():
+    try:
+        with open(RUN_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _clear_run_state():
+    try:
+        os.remove(RUN_STATE_FILE)
+    except OSError:
+        pass
+
+
+def _pid_alive(pid):
+    if pid is None:
+        return False
+    if psutil is not None:
+        try:
+            return psutil.pid_exists(int(pid))
+        except Exception:
+            return False
+    try:  # psutil が無い場合のフォールバック（Windows）
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {int(pid)}"],
+                             capture_output=True, text=True)
+        return str(int(pid)) in out.stdout
+    except Exception:
+        return False
+
+
+def _terminate_run(info):
+    """実行中の子プロセスを（並列モードの孫プロセスも含めて）停止する。"""
+    pid = info.get("pid")
+    if pid is None:
+        return
+    if psutil is not None:
+        try:
+            parent = psutil.Process(int(pid))
+            for child in parent.children(recursive=True):
+                child.kill()
+            parent.kill()
+            return
+        except Exception:
+            pass
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                       capture_output=True)
+
+
+def _run_state_active():
+    """実行中のバックグラウンド実行があるか。"""
+    info = _load_run_state()
+    if not info:
+        return False
+    proc = st.session_state.get("run_proc")
+    if proc is not None and getattr(proc, "pid", None) == info.get("pid"):
+        return proc.poll() is None
+    return _pid_alive(info.get("pid"))
+
+
+def _read_log_lines(log_path):
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
+def start_background_run(cfg, show_gif=True):
+    """sim_runner をログファイル出力の別プロセスとして起動し、状態を保存する。"""
     cfg_path = write_config(cfg)
-    log_box = st.empty()
-    lines = []
-    proc = subprocess.Popen(
-        [sys.executable, RUNNER, cfg_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        cwd=BASE_DIR,
-        env=_child_env(),
-    )
-    for line in proc.stdout:
-        lines.append(line.rstrip("\n"))
-        # 末尾200行だけ表示（長大なログでもUIが重くならないように）
-        log_box.code("\n".join(lines[-200:]), language="text")
-    proc.wait()
-    return proc.returncode, lines
+    out_dir = cfg["output_dir"]
+    if not os.path.isabs(out_dir):
+        out_dir = os.path.join(BASE_DIR, out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    log_path = os.path.join(out_dir, "run_log.txt")
+    creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    with open(log_path, "wb") as log_f:
+        proc = subprocess.Popen(
+            [sys.executable, RUNNER, cfg_path],
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
+            cwd=BASE_DIR,
+            env=_child_env(),
+            creationflags=creationflags,
+        )
+    info = {
+        "pid": proc.pid,
+        "log": log_path,
+        "mode": cfg["mode"],
+        "output_dir": cfg["output_dir"],
+        "show_gif": bool(show_gif),
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _save_run_state(info)
+    st.session_state["run_proc"] = proc
+    return info
+
+
+def render_run_monitor():
+    """バックグラウンド実行の進捗・結果を表示する（実行中は自動更新）。"""
+    info = _load_run_state()
+    if not info:
+        return
+    st.divider()
+    st.markdown("### 実行状況")
+    lines = _read_log_lines(info.get("log", ""))
+    proc = st.session_state.get("run_proc")
+    rc = None
+    if proc is not None and getattr(proc, "pid", None) == info.get("pid"):
+        rc = proc.poll()
+        running = rc is None
+    else:
+        # ページ再読み込み等でプロセスハンドルを失った場合は PID の生存で判断
+        running = _pid_alive(info.get("pid"))
+
+    if running:
+        st.info(
+            f"実行中です（mode={info.get('mode')} / 開始 {info.get('started')} / "
+            f"PID {info.get('pid')}）。ブラウザを閉じたり接続が切れても処理は継続します。"
+            "このページは約3秒ごとに自動更新されます。"
+        )
+        st.code("\n".join(lines[-40:]) or "(まだ出力がありません)", language="text")
+        if st.button("⏹ 実行を中止", key="abort_run"):
+            _terminate_run(info)
+            _clear_run_state()
+            st.session_state.pop("run_proc", None)
+            st.rerun()
+        time.sleep(3)
+        st.rerun()
+        return
+
+    # --- 完了（プロセスハンドルがあれば exit code、なければログの完了マーカーで判断） ---
+    finished_ok = (rc == 0) if rc is not None else any(
+        "sim_runner: done" in ln for ln in lines)
+    if finished_ok:
+        st.success(f"完了しました（mode={info.get('mode')}）。")
+    else:
+        st.error("異常終了した可能性があります。下のログを確認してください。")
+    with st.expander("実行ログ（末尾200行）", expanded=not finished_ok):
+        st.code("\n".join(lines[-200:]) or "(ログなし)", language="text")
+    if info.get("mode") == "SINGLE":
+        show_deviation_metrics(lines)
+        show_contact_metrics(lines)
+    show_results(info.get("mode"), info.get("output_dir", ""),
+                 show_gif=bool(info.get("show_gif", True)))
+    if st.button("結果表示を閉じる", key="clear_run"):
+        _clear_run_state()
+        st.session_state.pop("run_proc", None)
+        st.rerun()
 
 
 def run_interactive(cfg):
@@ -346,9 +555,11 @@ def show_results(mode, output_dir, show_gif=True):
 
 
 def show_deviation_metrics(log_lines):
-    """SINGLE モードの標準出力から理想位置とのズレ(DEVIATION_*)を抽出して表示する。"""
+    """SINGLE の標準出力から理想位置とのズレ(DEVIATION_*)と総合判定(JUDGE_*)を抽出して表示する。"""
     um = mm = None
     ok = None
+    judge_ok = None
+    judge_reason = None
     for line in log_lines:
         s = line.strip()
         if s.startswith("DEVIATION_UM:"):
@@ -357,17 +568,29 @@ def show_deviation_metrics(log_lines):
             mm = float(s.split(":", 1)[1])
         elif s.startswith("DEVIATION_OK:"):
             ok = s.split(":", 1)[1].strip() == "1"
+        elif s.startswith("JUDGE_OK:"):
+            judge_ok = s.split(":", 1)[1].strip() == "1"
+        elif s.startswith("JUDGE_REASON:"):
+            judge_reason = s.split(":", 1)[1].strip()
     if um is None:
         return
-    st.subheader("理想位置とのズレ")
-    c1, c2, c3 = st.columns(3)
+    st.subheader("判定結果")
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("ズレ (μm)", f"{um:.2f}")
     c2.metric("ズレ (mm)", f"{mm:.4f}")
-    c3.metric("許容判定", "OK" if ok else "NG")
-    if ok:
-        st.success("理想位置の許容誤差内に設置されました。")
+    c3.metric("許容誤差判定", "OK" if ok else "NG")
+    if judge_ok is not None:
+        c4.metric("総合判定", "OK" if judge_ok else "NG")
+        if judge_ok:
+            st.success("総合判定 OK：BATCH と同じ基準（姿勢・接触・位置）を満たしています。")
+        else:
+            st.warning(f"総合判定 NG：{judge_reason or '基準を満たしていません'}（BATCH と同じ基準）。")
     else:
-        st.warning("理想位置の許容誤差を超えています。")
+        # 後方互換（JUDGE_* が無い旧ログ）
+        if ok:
+            st.success("理想位置の許容誤差内に設置されました。")
+        else:
+            st.warning("理想位置の許容誤差を超えています。")
 
 
 def show_contact_metrics(log_lines):
@@ -429,11 +652,38 @@ with st.sidebar:
         value=float(S.get("simulation_duration", 4.0)), step=0.5
     )
     enable_floor_fail = st.checkbox("床接触をNG扱いにする", value=bool(S.get("enable_floor_fail", True)))
+    enable_no_contact_fail = st.checkbox(
+        "未接触をNG扱いにする",
+        value=bool(S.get("enable_no_contact_fail", False)),
+        help="最終フレームで斜面と接触していない場合にNGとします。"
+        "shape_query は接触がちょうど0距離だと検出できず、実際は斜面に寝ていても"
+        "未接触扱いになることがあるため、既定はOFFです。",
+    )
     generate_gif = st.checkbox(
         "SINGLE実行時にGIFを生成する",
         value=bool(S.get("generate_gif", True)),
         help="ONの場合、単一条件実行後にバーの動きをGIFとして保存し、結果欄に表示します。",
     )
+    with st.expander("脱着力（リリース時にワークへ加わる力）", expanded=False):
+        st.caption(
+            "脱着時の力 F によりワークへ加速度が与えられ、初期の落下方向が変化する"
+            "現象を再現します。力の強さは加速度 [μm/s²] で指定します"
+            "（参考: シミュレーション内の重力加速度は 981 μm/s²）。0 で無効。"
+        )
+        release_force_accel = st.number_input(
+            "力の強さ (μm/s²)", min_value=0.0, max_value=100000.0,
+            value=float(S.get("release_force_accel", 0.0)), step=50.0,
+        )
+        release_force_angle = st.number_input(
+            "力の方向 (°)", min_value=-180.0, max_value=360.0,
+            value=float(S.get("release_force_angle", 0.0)), step=5.0,
+            help="0°=+X(右)、90°=+Z(上)、反時計回り。画面固定軸です。",
+        )
+        release_force_duration = st.number_input(
+            "作用時間 (秒)", min_value=0.0, max_value=5.0,
+            value=float(S.get("release_force_duration", 0.1)), step=0.05,
+            help="リリース直後にこの時間だけ力が作用します。",
+        )
     with st.expander("接触判定の閾値", expanded=False):
         contact_count_threshold = st.number_input(
             "短冊方向 接触回数の閾値", min_value=1, max_value=50,
@@ -469,11 +719,17 @@ def common_cfg(angle_linked_offset):
         "output_dir": output_dir,
         "simulation_duration": simulation_duration,
         "enable_floor_fail": enable_floor_fail,
+        "enable_no_contact_fail": enable_no_contact_fail,
         "contact_count_threshold": contact_count_threshold,
         "contact_diff_threshold": contact_diff_threshold,
         "ideal_neighborhood_radius": ideal_neighborhood_radius,
         "angle_linked_offset": bool(angle_linked_offset),
         "generate_gif": generate_gif,
+        "release_force": {
+            "accel": float(release_force_accel),
+            "angle_deg": float(release_force_angle),
+            "duration": float(release_force_duration),
+        },
     }
 
 
@@ -483,10 +739,14 @@ S.update({
     "output_dir": output_dir,
     "simulation_duration": float(simulation_duration),
     "enable_floor_fail": bool(enable_floor_fail),
+    "enable_no_contact_fail": bool(enable_no_contact_fail),
     "generate_gif": bool(generate_gif),
     "contact_count_threshold": int(contact_count_threshold),
     "contact_diff_threshold": float(contact_diff_threshold),
     "ideal_neighborhood_radius": float(ideal_neighborhood_radius),
+    "release_force_accel": float(release_force_accel),
+    "release_force_angle": float(release_force_angle),
+    "release_force_duration": float(release_force_duration),
 })
 
 
@@ -523,11 +783,15 @@ if mode in ("SINGLE", "INTERACTIVE"):
     st.markdown("#### 実行前プレビュー（座標確認）")
     _ideal_x, _ideal_y = calc_ideal_position(int(angle))
     _rel_x, _rel_y = compute_release_pos(int(angle), int(rx), int(ry), bool(angle_linked_offset))
+    _release_angle_rad = math.radians(-int(angle)) + math.radians(-int(rel))
+    _rel_ll_x, _rel_ll_y = _bar_lower_left((_rel_x, _rel_y), (BAR_WIDTH_UM, BAR_HEIGHT_UM), _release_angle_rad)
     pc1, pc2 = st.columns([3, 2])
     with pc1:
         try:
             _fig, _coords = build_layout_preview(int(angle), int(rx), int(ry),
-                                                 bool(angle_linked_offset), int(rel))
+                                                 bool(angle_linked_offset), int(rel),
+                                                 float(release_force_accel),
+                                                 float(release_force_angle))
             st.pyplot(_fig, use_container_width=True)
             import matplotlib.pyplot as _plt
             _plt.close(_fig)
@@ -539,17 +803,18 @@ if mode in ("SINGLE", "INTERACTIVE"):
         for _label, (_px, _py) in (
             ("台座(BASE)", (BASE_X, BASE_Y)),
             ("理想位置", (_ideal_x, _ideal_y)),
-            ("落下開始位置", (_rel_x, _rel_y)),
+            ("落下開始位置（バー左下端）", (_rel_ll_x, _rel_ll_y)),
         ):
             st.markdown(f"**{_label}**")
             _cx, _cy = st.columns(2)
             _cx.metric("X (μm)", f"{_px:.1f}")
             _cy.metric("Z (μm)", f"{_py:.1f}")
-        _off_dist = math.hypot(_rel_x - _ideal_x, _rel_y - _ideal_y)
+        _off_dist = math.hypot(_rel_ll_x - _ideal_x, _rel_ll_y - _ideal_y)
         st.caption(
             f"オフセット原点＝理想位置／"
             f"{'ステージ角度に連動' if angle_linked_offset else '画面固定軸'}。"
-            f"理想位置→落下開始位置の距離: {_off_dist:.1f} μm（{_off_dist / PPM * 1000:.3f} mm）"
+            f"表示上の落下開始位置はバー左下端です。"
+            f"理想位置→バー左下端の距離: {_off_dist:.1f} μm（{_off_dist / PPM * 1000:.3f} mm）"
         )
 
     cfg = common_cfg(angle_linked_offset)
@@ -562,16 +827,9 @@ if mode in ("SINGLE", "INTERACTIVE"):
 
     if mode == "SINGLE":
         st.info(f"GIF生成: {'ON（実行後にGIFも表示します）' if generate_gif else 'OFF（PNGのみ表示します）'}")
-        if st.button("▶ 実行 (画像生成)", type="primary"):
-            with st.spinner("シミュレーション実行中..."):
-                rc, log_lines = run_blocking(cfg)
-            if rc == 0:
-                st.success("完了しました。")
-            else:
-                st.error(f"異常終了しました (exit={rc})。上のログを確認してください。")
-            show_deviation_metrics(log_lines)
-            show_contact_metrics(log_lines)
-            show_results("SINGLE", output_dir, show_gif=generate_gif)
+        if st.button("▶ 実行 (画像生成)", type="primary", disabled=_run_state_active()):
+            start_background_run(cfg, show_gif=generate_gif)
+            st.rerun()
     else:  # INTERACTIVE
         st.info(
             "INTERACTIVE モードは pygame の別ウィンドウで開きます（ブラウザ内には表示できません）。"
@@ -623,6 +881,71 @@ else:  # BATCH / BATCH_PARALLEL
         var_y = v2.number_input("Z バラツキ (μm)", min_value=0.0, value=float(S.get("var_y", 0.0)), step=1.0)
         var_a = v3.number_input("角度 バラツキ (°)", min_value=0.0, value=float(S.get("var_a", 0.0)), step=0.1)
 
+    # --- ヒートマップの表示設定と実行前プレビュー ---
+    with st.expander("ヒートマップの表示設定・プレビュー", expanded=False):
+        st.caption(
+            "出力されるヒートマップの軸目盛りの細かさと、オーバーレイ表示のON/OFFを"
+            "設定できます。下のプレビュー（成功率はダミー値）で見え方を実行前に確認してください。"
+        )
+        o1, o2, o3 = st.columns(3)
+        ov_stage = o1.checkbox("壁・斜面・台座の線", value=bool(S.get("ov_stage", True)))
+        ov_bar = o2.checkbox("理想バーの輪郭・マーカー", value=bool(S.get("ov_bar", True)))
+        ov_dim = o3.checkbox("寸法矢印（長さ・幅）", value=bool(S.get("ov_dim", True)))
+        o4, o5, o6 = st.columns(3)
+        ov_cross = o4.checkbox("基準線(0,0)・注記", value=bool(S.get("ov_cross", True)))
+        ov_cell = o5.checkbox(
+            "セルの成功率数値", value=bool(S.get("ov_cell", True)),
+            help="ONでもセル数が2500を超える場合は読めないため自動で省略されます。",
+        )
+        max_ticks = o6.number_input(
+            "軸目盛りの最大表示数", min_value=4, max_value=40,
+            value=int(S.get("max_ticks", 12)), step=1,
+            help="X/Z軸それぞれの目盛りラベルをこの数まで間引いて表示します。",
+        )
+        overlay_opts = {
+            "show_stage": bool(ov_stage),
+            "show_ideal_bar": bool(ov_bar),
+            "show_dimensions": bool(ov_dim),
+            "show_crosshair": bool(ov_cross),
+            "show_cell_values": bool(ov_cell),
+            "max_ticks": int(max_ticks),
+        }
+
+        show_preview = st.checkbox("プレビューを表示", value=bool(S.get("batch_preview", True)))
+        if show_preview:
+            try:
+                _prev_angles = list(range(int(angle_start), int(angle_stop), int(angle_step))) \
+                    or [int(angle_start)]
+                _saved_pa = int(S.get("preview_angle", _prev_angles[0]))
+                _pa_index = _prev_angles.index(_saved_pa) if _saved_pa in _prev_angles else 0
+                prev_angle = st.selectbox("プレビューするステージ角度 (°)", _prev_angles,
+                                          index=_pa_index)
+                S.update({"preview_angle": int(prev_angle)})
+                _xs_prev = list(range(int(x_start), int(x_stop), int(x_step)))
+                _zs_prev = list(range(int(y_start), int(y_stop), int(y_step)))
+                if len(_xs_prev) >= 2 and len(_zs_prev) >= 2:
+                    _fig = build_batch_heatmap_preview(
+                        int(prev_angle), _xs_prev, _zs_prev,
+                        bool(angle_linked_offset), overlay_opts)
+                    st.pyplot(_fig, use_container_width=True)
+                    import matplotlib.pyplot as _plt
+                    _plt.close(_fig)
+                    st.caption(
+                        f"グリッド: X {len(_xs_prev)}点 × Z {len(_zs_prev)}点 = "
+                        f"{len(_xs_prev) * len(_zs_prev)}セル。"
+                        "軸目盛り・オーバーレイの見え方は実行結果と同一です。"
+                    )
+                else:
+                    st.warning("プレビューには X/Z それぞれ2点以上の範囲が必要です。")
+            except Exception as _e:
+                st.warning(f"プレビューの描画に失敗しました: {_e}")
+
+    S.update({
+        "ov_stage": bool(ov_stage), "ov_bar": bool(ov_bar), "ov_dim": bool(ov_dim),
+        "ov_cross": bool(ov_cross), "ov_cell": bool(ov_cell),
+        "max_ticks": int(max_ticks), "batch_preview": bool(show_preview),
+    })
+
     # 試行数の概算を表示
     try:
         n_angle = len(range(int(angle_start), int(angle_stop), int(angle_step)))
@@ -663,19 +986,22 @@ else:  # BATCH / BATCH_PARALLEL
         "release_y_offset": [int(y_start), int(y_stop), int(y_step)],
         "relative_angle": rel_list,
     }
+    cfg["heatmap_overlay"] = overlay_opts
 
     label = "▶ 並列実行" if mode == "BATCH_PARALLEL" else "▶ 逐次実行"
-    if st.button(label, type="primary"):
-        with st.spinner("探索を実行中... (進捗は下のログに表示されます)"):
-            rc, _ = run_blocking(cfg)
-        if rc == 0:
-            st.success("完了しました。")
-        else:
-            st.error(f"異常終了しました (exit={rc})。上のログを確認してください。")
-        show_results(mode, output_dir)
+    if st.button(label, type="primary", disabled=_run_state_active()):
+        start_background_run(cfg, show_gif=False)
+        st.rerun()
 
 
 # --------------------------------------------------------------------------
 # 設定の永続化（毎回の実行末尾で現在値を保存。次回起動時に復元される）
+# 注意: render_run_monitor() は実行中 st.rerun() でスクリプトを打ち切るため、
+#       設定保存はその前に行う。
 # --------------------------------------------------------------------------
 save_settings(S)
+
+# --------------------------------------------------------------------------
+# バックグラウンド実行の監視・結果表示（SINGLE/BATCH/BATCH_PARALLEL 共通）
+# --------------------------------------------------------------------------
+render_run_monitor()

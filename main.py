@@ -13,6 +13,7 @@ try:
     import pandas as pd
     import matplotlib.pyplot as plt
     import seaborn as sns
+    import heatmap_render  # BATCHヒートマップの軸・オーバーレイ描画（Streamlitプレビューと共用）
 
     LIBRARIES_INSTALLED = True
 except ImportError:
@@ -54,6 +55,10 @@ WIDTH, HEIGHT = 4000, 4000  # 4mm × 4mm (1 pixel = 1 μm)
 PPM = 1000000.0         # 1,000,000 pixels/m = 1 pixel/μm
 SIMULATION_DURATION = 4.0
 ENABLE_FLOOR_FAIL_VALIDATION = True
+# 「未接触」判定（最終フレームで斜面と接触していなければ NG）を有効にするか。
+# shape_query は接触が「ちょうど0距離」だと検出できず、実際は斜面に寝ていても
+# 未接触扱いになる脆さがあるため、既定では無効化しておく。
+ENABLE_NO_CONTACT_FAIL = False
 
 # --- GIF アニメーション出力設定（SINGLE モード）---
 # バーがセットされるまでの動きを GIF として出力する。
@@ -80,6 +85,21 @@ HEATMAP_OVERLAY_SIZE = 16      # バー寸法・中心・斜面/壁面などの�
 # False: 画面固定軸。実X = ideal_x + Xオフセット, 実Y = ideal_y - Yオフセット
 # True : ステージ傾斜に連動。Xオフセット=斜面方向, Yオフセット=壁方向に軸が回転する
 ANGLE_LINKED_OFFSET = False
+
+# --- 脱着力（リリース時にワークへ加わる力）設定 ---
+# 脱着時の力 F によってワークへ加速度が与えられ、初期の落下方向が変化する現象を
+# モデル化する。力の強さは加速度 [μm/s²] で指定し（バー質量に依存しない）、
+# リリース直後から RELEASE_FORCE_DURATION 秒間だけバー重心へ作用する。
+# 参考: このシミュレーションの重力加速度は space.gravity = 981 μm/s²。
+RELEASE_FORCE_ACCEL = 0.0       # 力の強さ（加速度）[μm/s²]。0 で無効
+RELEASE_FORCE_ANGLE_DEG = 0.0   # 力の方向 [°]。0°=+X(右) / 90°=+Z(上) / 反時計回り
+RELEASE_FORCE_DURATION = 0.1    # 力の作用時間 [s]
+
+# --- BATCH ヒートマップの表示設定 ---
+# 軸目盛りの最大表示数と、オーバーレイ（壁・斜面・理想バー・寸法矢印・基準線・
+# セル数値）のON/OFF。キーの意味は heatmap_render.DEFAULT_OVERLAY_OPTIONS を参照。
+HEATMAP_OVERLAY_OPTIONS = (dict(heatmap_render.DEFAULT_OVERLAY_OPTIONS)
+                           if LIBRARIES_INSTALLED else {})
 
 # --- 判定閾値設定 ---
 CONTACT_COUNT_THRESHOLD = 1  # 端面（短手面）接触の回数閾値。理想位置近傍を除いた端面接触がこの回数以上でNG
@@ -110,7 +130,7 @@ SUCCESS_CRITERIA = {
     'max_angular_velocity': 0.5,      # 最大角速度 0.5 rad/s
     'angle_tolerance_rad': math.radians(1.0),  # 角度許容誤差 1度
     'min_settle_time': 1.0,           # 最小安定時間 1.0秒
-    'position_tolerance': 10.0        # 理想位置からの許容誤差 10μm (10 pixels)
+    'position_tolerance': 200.0        # 理想位置からの許容誤差 200μm (200 pixels)
 }
 BASE_X, BASE_Y, SLOPE_LENGTH = 2000, 2000, 1500  # pixels = μm (画面中央, 斜面長さ1.5mm)
 
@@ -186,6 +206,25 @@ def create_bar(space, pos, angle, is_visual):
     return shape
 
 
+def apply_release_force(bar_body, dt):
+    """脱着力をバー重心へ加える。毎ステップ space.step() の直前に呼ぶこと。
+
+    脱着時の力 F でワークへ加速度が与えられ、初期の落下方向が変化する現象のモデル。
+    リリースからの経過時間は body の属性 release_force_elapsed で管理し、
+    RELEASE_FORCE_DURATION 秒を超えたら作用を終了する。
+    （pymunk の力は step ごとにリセットされるため、毎ステップ加え直す）
+    """
+    if RELEASE_FORCE_ACCEL == 0:
+        return
+    elapsed = getattr(bar_body, "release_force_elapsed", 0.0)
+    if elapsed < RELEASE_FORCE_DURATION:
+        rad = math.radians(RELEASE_FORCE_ANGLE_DEG)
+        fx = bar_body.mass * RELEASE_FORCE_ACCEL * math.cos(rad)
+        fy = -bar_body.mass * RELEASE_FORCE_ACCEL * math.sin(rad)  # 画面座標は +Z(上) = -Y
+        bar_body.apply_force_at_world_point((fx, fy), bar_body.position)
+    bar_body.release_force_elapsed = elapsed + dt
+
+
 def check_success(bar_shape, slope_segment, wall_segment, slope_angle_rad, floor_was_hit, settle_time=None):
     """バーの成功判定を行う（より厳格な基準）"""
     if ENABLE_FLOOR_FAIL_VALIDATION and floor_was_hit: return False, "床に接触"
@@ -225,8 +264,8 @@ def check_success(bar_shape, slope_segment, wall_segment, slope_angle_rad, floor
             other_shape = contact_info.shape
             if other_shape == slope_segment: touching_slope = True
 
-    # 未接触判定を緩和：斜面接触のみで成功とする
-    if not touching_slope: return False, "未接触"
+    # 未接触判定：斜面接触のみで成功とする（ENABLE_NO_CONTACT_FAIL が True のときのみ有効）
+    if ENABLE_NO_CONTACT_FAIL and not touching_slope: return False, "未接触"
     # 壁面接触は必須ではない（より緩い条件）
     return True, "成功"
 
@@ -287,6 +326,11 @@ def get_rect_vertices(pos, size, angle):
         rx, ry = dw * cos_a - dh * sin_a, dw * sin_a + dh * cos_a
         vertices.append((pos[0] + rx, pos[1] + ry))
     return vertices
+
+
+def get_bar_lower_left(pos, size, angle):
+    """バー中心・寸法・角度から、ローカル左下端の座標を返す。"""
+    return get_rect_vertices(pos, size, angle)[3]
 
 
 def draw_arrow(surface, color, start, end, width=5, head=26):
@@ -381,6 +425,39 @@ def draw_coordinates(surface, font, off_x=0, off_y=0):
         surface.blit(font.render(str(y), True, label_color), (off_x + 5, y + off_y + 5))
 
 
+# --- pymunk 衝突ハンドラ互換シム ---
+# pymunk 7.x では Space.add_collision_handler / set_collision_handler が廃止され、
+# Space.on_collision(type_a, type_b, begin=...) に一本化された。既存コードは
+# handler.begin への代入と handler.data 辞書を前提にしているため、その使い勝手を
+# そのまま保つ薄いラッパを用意して on_collision へ委譲する。
+class _CollisionHandlerCompat:
+    def __init__(self, space, type_a, type_b):
+        self._space = space
+        self._type_a = type_a
+        self._type_b = type_b
+        self.data = {}
+        self._begin = None
+
+    @property
+    def begin(self):
+        return self._begin
+
+    @begin.setter
+    def begin(self, fn):
+        self._begin = fn
+        # begin(arbiter, space, data) を on_collision へ登録する。data には本ラッパの
+        # self.data を渡し、旧来の handler.data 参照・更新と挙動を一致させる。
+        self._space.on_collision(
+            self._type_a, self._type_b,
+            begin=lambda arb, sp, _d, _f=fn: _f(arb, sp, self.data),
+        )
+
+
+def _add_collision_handler(space, type_a, type_b):
+    """pymunk 7.x の on_collision を旧 add_collision_handler 互換で扱うためのシム。"""
+    return _CollisionHandlerCompat(space, type_a, type_b)
+
+
 ### --- モード別実行関数 ---
 def run_interactive_mode():
     pygame.init()
@@ -446,7 +523,7 @@ def run_interactive_mode():
             data["hit_angle"] = dynamic_bars[0].body.angle
         return True
 
-    handler = space.add_collision_handler(BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE);
+    handler = _add_collision_handler(space, BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE);
     handler.begin = floor_contact_handler;
     handler.data["hit_flag"] = floor_hit_flag
     handler.data["hit_position"] = None
@@ -499,7 +576,7 @@ def run_interactive_mode():
                         data["contact_point"] = contact_point
         return True
     
-    wall_handler = space.add_collision_handler(BAR_COLLISION_TYPE, WALL_COLLISION_TYPE);
+    wall_handler = _add_collision_handler(space, BAR_COLLISION_TYPE, WALL_COLLISION_TYPE);
     wall_handler.begin = wall_contact_handler;
     wall_handler.data["hit_flag"] = wall_hit_flag
     wall_handler.data["hit_position"] = None
@@ -509,7 +586,7 @@ def run_interactive_mode():
     wall_handler.data["contact_count"] = 0
 
     # 斜面(STAGE)との短冊接触も同じハンドラで監視する（hit_flag は壁と共有）
-    stage_short_handler = space.add_collision_handler(BAR_COLLISION_TYPE, STAGE_COLLISION_TYPE)
+    stage_short_handler = _add_collision_handler(space, BAR_COLLISION_TYPE, STAGE_COLLISION_TYPE)
     stage_short_handler.begin = wall_contact_handler
     stage_short_handler.data["hit_flag"] = wall_hit_flag
     stage_short_handler.data["hit_position"] = None
@@ -1009,7 +1086,9 @@ def run_interactive_mode():
 
         pygame.display.flip()
         dt = 1.0 / 60.0
-        for _ in range(INTERACTIVE_SUBSTEPS): space.step(dt / INTERACTIVE_SUBSTEPS)
+        for _ in range(INTERACTIVE_SUBSTEPS):
+            for _bar in dynamic_bars: apply_release_force(_bar.body, dt / INTERACTIVE_SUBSTEPS)
+            space.step(dt / INTERACTIVE_SUBSTEPS)
         clock.tick(60)
     pygame.quit()
 
@@ -1035,7 +1114,7 @@ def run_single_condition_mode():
     release_pos = compute_release_pos(params['angle'], params['release_x_offset'], params['release_y_offset'])
     space = pymunk.Space();
     space.gravity = (0, 981)
-    setup_space(space, stage_angle_rad, is_visual=True)
+    slope_seg_single, wall_seg_single, _ = setup_space(space, stage_angle_rad, is_visual=True)
     if not check_initial_position(space, release_pos, actual_release_angle_rad):
         print("警告: 指定された初期位置は壁やステージにめり込んでいます。")
     bar = create_bar(space, release_pos, actual_release_angle_rad, is_visual=True)
@@ -1045,6 +1124,7 @@ def run_single_condition_mode():
                      "short_wall": 0, "short_slope": 0,
                      "excluded_near_ideal": 0, "counted_short": 0, "accumulated_diff": 0.0}
     contact_history = []
+    floor_hit_flag = [False]
 
     def single_contact_handler(arbiter, space, data):
         surface = data.get("surface", "wall")  # "wall" or "slope"
@@ -1076,13 +1156,19 @@ def run_single_condition_mode():
         contact_history.append((0, contact_point))
         return True
 
+    def single_floor_handler(arbiter, space, data):
+        floor_hit_flag[0] = True
+        return True
+
     try:
-        _wh = space.add_collision_handler(BAR_COLLISION_TYPE, WALL_COLLISION_TYPE)
+        _wh = _add_collision_handler(space, BAR_COLLISION_TYPE, WALL_COLLISION_TYPE)
         _wh.begin = single_contact_handler
         _wh.data["surface"] = "wall"
-        _sh = space.add_collision_handler(BAR_COLLISION_TYPE, STAGE_COLLISION_TYPE)
+        _sh = _add_collision_handler(space, BAR_COLLISION_TYPE, STAGE_COLLISION_TYPE)
         _sh.begin = single_contact_handler
         _sh.data["surface"] = "slope"
+        _fh = _add_collision_handler(space, BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE)
+        _fh.begin = single_floor_handler
     except Exception as e:
         print(f"警告: 衝突ハンドラの登録に失敗しました: {e}")
 
@@ -1091,7 +1177,10 @@ def run_single_condition_mode():
     trajectory = [(bar.body.position.x, bar.body.position.y)]
     bar_states = [(bar.body.position.x, bar.body.position.y, bar.body.angle)]
     for _ in range(int(SIMULATION_DURATION / (1.0 / 60.0))):
+        apply_release_force(bar.body, 1.0 / 60.0)
         space.step(1.0 / 60.0)
+        if bar.body.position.y >= HEIGHT - 10:  # 床接触の簡易バックアップ判定
+            floor_hit_flag[0] = True
         trajectory.append((bar.body.position.x, bar.body.position.y))
         bar_states.append((bar.body.position.x, bar.body.position.y, bar.body.angle))
     # --- 描画キャンバスの動的サイズ計算 ---
@@ -1099,9 +1188,10 @@ def run_single_condition_mode():
     # 全描画要素を含む境界からキャンバスサイズと平行移動量(OX, OY)を求める。
     final_x, final_y = bar.body.position.x, bar.body.position.y
     initial_vertices = get_rect_vertices(release_pos, (BAR_WIDTH * PPM, BAR_HEIGHT * PPM), actual_release_angle_rad)
+    release_lower_left = get_bar_lower_left(release_pos, (BAR_WIDTH * PPM, BAR_HEIGHT * PPM), actual_release_angle_rad)
     ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
-    bound_xs = [0, WIDTH, release_pos[0], final_x, ideal_x] + [v[0] for v in initial_vertices] + [p[0] for p in trajectory]
-    bound_ys = [0, HEIGHT, release_pos[1], final_y, ideal_y] + [v[1] for v in initial_vertices] + [p[1] for p in trajectory]
+    bound_xs = [0, WIDTH, release_lower_left[0], final_x, ideal_x] + [v[0] for v in initial_vertices] + [p[0] for p in trajectory]
+    bound_ys = [0, HEIGHT, release_lower_left[1], final_y, ideal_y] + [v[1] for v in initial_vertices] + [p[1] for p in trajectory]
     margin = 300
     min_x, max_x = min(bound_xs) - margin, max(bound_xs) + margin
     min_y, max_y = min(bound_ys) - margin, max(bound_ys) + margin
@@ -1128,10 +1218,11 @@ def run_single_condition_mode():
     traj_points = [P(x, y) for x, y in trajectory]
     if len(traj_points) >= 2:
         pygame.draw.lines(surface, (200, 0, 200), False, traj_points, 3)
-        # 始点（リリース位置）を強調
-        pygame.draw.circle(surface, (200, 0, 200), traj_points[0], 14, 4)
-        surface.blit(font_label_s.render("リリース", True, (160, 0, 160)),
-                     (traj_points[0][0] + 30, traj_points[0][1] - 70))
+        # 始点表示はバー左下端を強調する（軌跡線自体は重心軌跡）。
+        release_ll_pt = P(*release_lower_left)
+        pygame.draw.circle(surface, (200, 0, 200), release_ll_pt, 14, 4)
+        surface.blit(font_label_s.render("リリース左下端", True, (160, 0, 160)),
+                     (release_ll_pt[0] + 30, release_ll_pt[1] - 70))
 
     # --- 座標軸の表記 ---
     # (1) 画面座標軸（左上・原点(0,0)、X→右 / Z↓下）
@@ -1179,6 +1270,16 @@ def run_single_condition_mode():
     tolerance = SUCCESS_CRITERIA['position_tolerance']
     within_tol = diff_px <= tolerance
 
+    # --- BATCH と同じ基準で総合判定する（位置ズレ単独ではなく check_success + 短冊接触） ---
+    # 端面（短冊面）で接触・自立しているケースは姿勢が斜面角と大きくずれるため、
+    # check_success の角度判定等で NG になる。複数短冊接触も BATCH と同条件で NG にする。
+    multi_short = (contact_stats["counted_short"] >= CONTACT_COUNT_THRESHOLD
+                   and contact_stats["accumulated_diff"] > CONTACT_DIFF_THRESHOLD)
+    overall_ok, judge_reason = check_success(
+        bar, slope_seg_single, wall_seg_single, stage_angle_rad, floor_hit_flag[0])
+    if overall_ok and multi_short:
+        overall_ok, judge_reason = False, "複数短冊接触"
+
     # --- 落ちたバーの最終位置の形状（矩形）をそのまま描画して残す ---
     # リリース位置は半透明の青なので、最終位置はオレンジ塗り＋枠線で区別する
     final_bar_vertices = get_rect_vertices(bar.body.position, (BAR_WIDTH * PPM, BAR_HEIGHT * PPM), bar.body.angle)
@@ -1197,10 +1298,12 @@ def run_single_condition_mode():
     pygame.draw.line(surface, (255, 120, 0), P(ideal_x, ideal_y), P(final_x, final_y), 4)
 
     # ズレ値のテキスト（上部・画面座標軸と重ならない位置、背景付きで見やすく）
-    judge_color = (0, 150, 0) if within_tol else (210, 0, 0)
+    judge_color = (0, 150, 0) if overall_ok else (210, 0, 0)
+    tol_color = (0, 150, 0) if within_tol else (210, 0, 0)
     lines = [
         (f"理想位置とのズレ: {diff_px:.2f} μm ({diff_mm:.4f} mm)", (20, 20, 20)),
-        (f"許容誤差 {tolerance:.0f} μm → {'OK' if within_tol else 'NG'}", judge_color),
+        (f"許容誤差 {tolerance:.0f} μm → {'OK' if within_tol else 'NG'}", tol_color),
+        (f"総合判定: {'OK' if overall_ok else 'NG（' + judge_reason + '）'}", judge_color),
     ]
     pad = 20
     box_w, box_h = 1500, pad * 2 + len(lines) * 84
@@ -1232,7 +1335,7 @@ def run_single_condition_mode():
 
     # ファイル名に日時・ステージ角度・落とした距離（リリースX/Yオフセット）を含めて毎回別名で保存する
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    judge = "OK" if within_tol else "NG"
+    judge = "OK" if overall_ok else "NG"
     rx = params['release_x_offset']
     ry = params['release_y_offset']
     filename = f"single_result_{ts}_angle{params['angle']}deg_x{rx}um_y{ry}um_{judge}.png"
@@ -1260,11 +1363,11 @@ def run_single_condition_mode():
             pygame.draw.line(base, (0, 180, 0), P(ideal_x, ideal_y - 28), P(ideal_x, ideal_y + 28), 3)
             base.blit(font_label_s.render("理想位置", True, (0, 140, 0)), P(ideal_x + 34, ideal_y - 30))
 
-            # 落下開始位置（マゼンタの円）と落下終了位置（青の十字）を背景に重ねておく
-            start_pt = P(*release_pos)
+            # 落下開始位置（バー左下端・マゼンタの円）と落下終了位置（青の十字）を背景に重ねておく
+            start_pt = P(*release_lower_left)
             end_pt = P(final_x, final_y)
             pygame.draw.circle(base, (200, 0, 200), start_pt, 14, 4)
-            base.blit(font_label_s.render("落下開始位置", True, (160, 0, 160)),
+            base.blit(font_label_s.render("落下開始位置(左下端)", True, (160, 0, 160)),
                       (start_pt[0] + 20, start_pt[1] - 60))
             pygame.draw.circle(base, (0, 0, 255), end_pt, 16, 4)
             pygame.draw.line(base, (0, 0, 255), (end_pt[0] - 24, end_pt[1]), (end_pt[0] + 24, end_pt[1]), 2)
@@ -1318,6 +1421,9 @@ def run_single_condition_mode():
     print(f"DEVIATION_UM: {diff_px:.3f}")
     print(f"DEVIATION_MM: {diff_mm:.5f}")
     print(f"DEVIATION_OK: {1 if within_tol else 0}")
+    print(f"総合判定: {'OK' if overall_ok else 'NG'} (理由: {judge_reason})")
+    print(f"JUDGE_OK: {1 if overall_ok else 0}")
+    print(f"JUDGE_REASON: {judge_reason}")
     print(f"軌跡: {len(traj_points)} 点を記録・描画しました（リリース→最終到達地点）。")
     print("--- 短冊接触の集計（斜面+壁） ---")
     print(f"接触イベント総数: 斜面 {c['slope_begin']} / 壁 {c['wall_begin']}")
@@ -1358,223 +1464,10 @@ def generate_heatmaps(df):
         return max(1, int(round(base * HEATMAP_FONT_SCALE)))
     FS_TITLE = _fs(HEATMAP_TITLE_SIZE)
     FS_LABEL = _fs(HEATMAP_LABEL_SIZE)
-    FS_TICK = _fs(HEATMAP_TICK_SIZE)
     FS_CBAR_LABEL = _fs(HEATMAP_CBAR_LABEL_SIZE)
     FS_CBAR_TICK = _fs(HEATMAP_CBAR_TICK_SIZE)
     FS_CELL = _fs(HEATMAP_CELL_SIZE)
-    FS_OVERLAY = _fs(HEATMAP_OVERLAY_SIZE)
 
-    def value_to_heatmap_index(values, target):
-        """実オフセット値を imshow のセル座標へ線形変換する。"""
-        vals = [float(v) for v in values]
-        if not vals or target < vals[0] or target > vals[-1]:
-            return None
-        if len(vals) == 1:
-            return 0 if vals[0] == target else None
-        for i, val in enumerate(vals):
-            if val == target:
-                return float(i)
-        for i in range(len(vals) - 1):
-            left, right = vals[i], vals[i + 1]
-            if left <= target <= right and right != left:
-                return i + (target - left) / (right - left)
-        return None
-
-    def draw_ideal_bar_overlay(ax, x_positions, y_positions, angle_deg):
-        """
-        ヒートマップ軸は理想位置原点のリリースオフセット。
-        そのため理想リリース位置は (X=0, Z=0) として点線で重ねる。
-        """
-        def map_point(x, y):
-            ix = value_to_heatmap_index(x_positions, x)
-            iy = value_to_heatmap_index(y_positions, y)
-            if ix is None or iy is None:
-                return None
-            return ix, iy
-
-        def draw_dimension(start, end, label, label_offset=(0.15, 0.15)):
-            p0 = map_point(*start)
-            p1 = map_point(*end)
-            if p0 is None or p1 is None:
-                return False
-            ax.annotate(
-                "",
-                xy=p1,
-                xytext=p0,
-                arrowprops=dict(
-                    arrowstyle="<->",
-                    color="black",
-                    linestyle="--",
-                    linewidth=1.4,
-                    shrinkA=0,
-                    shrinkB=0,
-                ),
-            )
-            mx = (p0[0] + p1[0]) / 2 + label_offset[0]
-            my = (p0[1] + p1[1]) / 2 + label_offset[1]
-            ax.text(
-                mx, my, label,
-                color="black", fontsize=FS_OVERLAY,
-                bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"),
-                fontproperties=jp_font,
-            )
-            return True
-
-        cx = value_to_heatmap_index(x_positions, 0.0)
-        cy = value_to_heatmap_index(y_positions, 0.0)
-        if cx is None or cy is None:
-            ax.text(
-                0.02, 0.98, "理想位置(0,0)は範囲外",
-                transform=ax.transAxes,
-                ha="left", va="top",
-                color="black", fontsize=FS_OVERLAY,
-                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
-                fontproperties=jp_font,
-            )
-            return
-
-        ax.axvline(cx, color="black", linestyle=":", linewidth=1.4, alpha=0.9)
-        ax.axhline(cy, color="black", linestyle=":", linewidth=1.4, alpha=0.9)
-        ax.plot(cx, cy, marker="+", color="black", markersize=11, markeredgewidth=2)
-
-        bar_w = BAR_WIDTH * PPM
-        bar_h = BAR_HEIGHT * PPM
-        ax.text(
-            0.02, 0.98,
-            f"理想バー中心: X=0, Z=0\n寸法: 長さ {bar_h:.0f} μm / 幅 {bar_w:.0f} μm",
-            transform=ax.transAxes,
-            ha="left", va="top",
-            color="black", fontsize=FS_OVERLAY,
-            bbox=dict(facecolor="white", alpha=0.78, edgecolor="none"),
-            fontproperties=jp_font,
-        )
-        # オフセット座標はZ正方向が上。画面座標系の角度を反転して、ヒートマップ上の向きに合わせる。
-        bar_angle = math.radians(angle_deg)
-        verts_offset = get_rect_vertices((0.0, 0.0), (bar_w, bar_h), bar_angle)
-        verts_idx = []
-        for vx, vy in verts_offset:
-            ix = value_to_heatmap_index(x_positions, vx)
-            iy = value_to_heatmap_index(y_positions, vy)
-            if ix is None or iy is None:
-                verts_idx = []
-                break
-            verts_idx.append((ix, iy))
-        if verts_idx:
-            ax.add_patch(Polygon(
-                verts_idx,
-                closed=True,
-                fill=False,
-                edgecolor="black",
-                linestyle="--",
-                linewidth=2.0,
-                alpha=0.95,
-            ))
-        cos_a, sin_a = math.cos(bar_angle), math.sin(bar_angle)
-        width_axis = (cos_a, sin_a)
-        length_axis = (-sin_a, cos_a)
-        length_start = (-length_axis[0] * bar_h / 2, -length_axis[1] * bar_h / 2)
-        length_end = (length_axis[0] * bar_h / 2, length_axis[1] * bar_h / 2)
-        width_start = (-width_axis[0] * bar_w / 2, -width_axis[1] * bar_w / 2)
-        width_end = (width_axis[0] * bar_w / 2, width_axis[1] * bar_w / 2)
-        draw_dimension(length_start, length_end, f"長さ {bar_h:.0f} μm")
-        draw_dimension(width_start, width_end, f"幅 {bar_w:.0f} μm", label_offset=(0.15, -0.35))
-        ax.text(
-            cx + 0.15, cy + 0.15, "中心(0,0)",
-            color="black", fontsize=FS_OVERLAY,
-            bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
-            fontproperties=jp_font,
-        )
-
-    def draw_stage_lines(ax, x_positions, y_positions, angle_deg):
-        """斜面と壁面の向きを、ヒートマップ中心（理想位置＝オフセット原点 (0,0)）を通る
-        点線として重ねる。実際の斜面/壁は中心から離れた位置（壁≈幅の半分、斜面≈長さの半分）
-        にあるが、向きの基準が分かるよう中心へ平行移動して表示する。"""
-        stage_angle_rad = math.radians(-angle_deg)
-
-        def world_dir_to_offset(dwx, dwy):
-            """世界座標の方向ベクトルをオフセット座標の方向へ変換する（compute_release_pos の線形部）。"""
-            if ANGLE_LINKED_OFFSET:
-                cos_t, sin_t = math.cos(stage_angle_rad), math.sin(stage_angle_rad)
-                return dwx * cos_t + dwy * sin_t, dwx * sin_t - dwy * cos_t
-            return dwx, -dwy
-
-        x_vals = [float(v) for v in x_positions]
-        y_vals = [float(v) for v in y_positions]
-        if len(x_vals) < 2 or len(y_vals) < 2:
-            return
-        xmin, xmax = x_vals[0], x_vals[-1]
-        ymin, ymax = y_vals[0], y_vals[-1]
-        # 中心（オフセット原点）が表示範囲内にあるときだけ基準線を描く
-        if not (xmin <= 0 <= xmax and ymin <= 0 <= ymax):
-            return
-
-        def clip(x0, y0, x1, y1):
-            """線分を可視範囲 [xmin,xmax]x[ymin,ymax] に Liang-Barsky でクリップ。"""
-            dx, dy = x1 - x0, y1 - y0
-            p = [-dx, dx, -dy, dy]
-            q = [x0 - xmin, xmax - x0, y0 - ymin, ymax - y0]
-            u0, u1 = 0.0, 1.0
-            for pi, qi in zip(p, q):
-                if pi == 0:
-                    if qi < 0:
-                        return None
-                else:
-                    t = qi / pi
-                    if pi < 0:
-                        if t > u1:
-                            return None
-                        u0 = max(u0, t)
-                    else:
-                        if t < u0:
-                            return None
-                        u1 = min(u1, t)
-            if u0 > u1:
-                return None
-            return x0 + u0 * dx, y0 + u0 * dy, x0 + u1 * dx, y0 + u1 * dy
-
-        def clamp(v, lo, hi):
-            return max(lo, min(hi, v))
-
-        L = 100000.0  # 中心(0,0)を通る直線を十分長く延ばしてからクリップする
-        slope_dir = world_dir_to_offset(math.cos(stage_angle_rad), math.sin(stage_angle_rad))
-        wall_dir = world_dir_to_offset(math.cos(stage_angle_rad - math.pi / 2),
-                                       math.sin(stage_angle_rad - math.pi / 2))
-        lines = [
-            ("斜面", slope_dir[0], slope_dir[1], "saddlebrown"),
-            ("壁面", wall_dir[0], wall_dir[1], "navy"),
-        ]
-        for label, ux, uy, color in lines:
-            # 中心(0,0)を通る直線として ±L 延長
-            clipped = clip(-ux * L, -uy * L, ux * L, uy * L)
-            if clipped is None:
-                continue
-            cx0, cy0, cx1, cy1 = clipped
-            ix0 = value_to_heatmap_index(x_positions, clamp(cx0, xmin, xmax))
-            iy0 = value_to_heatmap_index(y_positions, clamp(cy0, ymin, ymax))
-            ix1 = value_to_heatmap_index(x_positions, clamp(cx1, xmin, xmax))
-            iy1 = value_to_heatmap_index(y_positions, clamp(cy1, ymin, ymax))
-            if None in (ix0, iy0, ix1, iy1):
-                continue
-            ax.plot([ix0, ix1], [iy0, iy1], color=color, linestyle="--",
-                    linewidth=1.6, alpha=0.9, zorder=5)
-            # ラベルは中心を避け、線の端寄り(85%)に置く
-            mx = ix0 + 0.85 * (ix1 - ix0)
-            my = iy0 + 0.85 * (iy1 - iy0)
-            ax.text(mx, my, label, color=color, fontsize=FS_OVERLAY, zorder=6,
-                    bbox=dict(facecolor="white", alpha=0.7, edgecolor="none"),
-                    fontproperties=jp_font)
-
-    def set_thinned_ticks(ax, x_positions, y_positions, max_ticks=12):
-        """セル数が多いと軸ラベルが潰れるため、最大 max_ticks 本程度に間引いて表示する。"""
-        nx, ny = len(x_positions), len(y_positions)
-        sx = max(1, int(math.ceil(nx / float(max_ticks))))
-        sy = max(1, int(math.ceil(ny / float(max_ticks))))
-        xt = list(range(0, nx, sx))
-        yt = list(range(0, ny, sy))
-        ax.set_xticks(xt)
-        ax.set_yticks(yt)
-        ax.set_xticklabels([x_positions[i] for i in xt], rotation=45, fontsize=FS_TICK)
-        ax.set_yticklabels([y_positions[i] for i in yt], fontsize=FS_TICK)
 
     # 角度のユニーク値を取得
     angles = sorted(df['angle'].unique())
@@ -1621,17 +1514,20 @@ def generate_heatmaps(df):
         im = ax.imshow(success_matrix, cmap='RdYlGn', vmin=0, vmax=100, 
                       aspect='auto', origin='lower')
         
-        # 軸の設定
-        set_thinned_ticks(ax, x_positions, y_positions)
-        draw_ideal_bar_overlay(ax, x_positions, y_positions, angle)
-        draw_stage_lines(ax, x_positions, y_positions, angle)
+        # 軸の設定（目盛りは最大数まで間引き）とオーバーレイ描画
+        heatmap_render.set_heatmap_ticks(ax, x_positions, y_positions,
+                                         HEATMAP_OVERLAY_OPTIONS.get("max_ticks", 12))
+        heatmap_render.draw_overlays(ax, x_positions, y_positions, angle,
+                                     ANGLE_LINKED_OFFSET, jp_font, HEATMAP_OVERLAY_OPTIONS)
 
-        # 成功率の値を各セルに表示
-        for i in range(len(y_positions)):
-            for j in range(len(x_positions)):
-                if not np.isnan(success_matrix[i, j]):
-                    text = ax.text(j, i, f'{success_matrix[i, j]:.0f}',
-                                 ha="center", va="center", color="black", fontsize=FS_CELL)
+        # 成功率の値を各セルに表示（OFF設定またはセル数が多すぎる場合は省略）
+        if heatmap_render.cell_values_visible(x_positions, y_positions,
+                                              HEATMAP_OVERLAY_OPTIONS):
+            for i in range(len(y_positions)):
+                for j in range(len(x_positions)):
+                    if not np.isnan(success_matrix[i, j]):
+                        ax.text(j, i, f'{success_matrix[i, j]:.0f}',
+                                ha="center", va="center", color="black", fontsize=FS_CELL)
         
         # タイトルとラベル
         if jp_font:
@@ -1693,10 +1589,11 @@ def generate_heatmaps(df):
         im = ax.imshow(success_matrix, cmap='RdYlGn', vmin=0, vmax=100, 
                       aspect='auto', origin='lower')
         
-        # 軸の設定
-        set_thinned_ticks(ax, x_positions, y_positions)
-        draw_ideal_bar_overlay(ax, x_positions, y_positions, angle)
-        draw_stage_lines(ax, x_positions, y_positions, angle)
+        # 軸の設定（目盛りは最大数まで間引き）とオーバーレイ描画
+        heatmap_render.set_heatmap_ticks(ax, x_positions, y_positions,
+                                         HEATMAP_OVERLAY_OPTIONS.get("max_ticks", 12))
+        heatmap_render.draw_overlays(ax, x_positions, y_positions, angle,
+                                     ANGLE_LINKED_OFFSET, jp_font, HEATMAP_OVERLAY_OPTIONS)
 
         # タイトルとラベル
         if jp_font:
@@ -1841,20 +1738,21 @@ def run_single_condition_parallel(params_data):
                 return True
 
             try:
-                wh = space.add_collision_handler(BAR_COLLISION_TYPE, WALL_COLLISION_TYPE)
+                wh = _add_collision_handler(space, BAR_COLLISION_TYPE, WALL_COLLISION_TYPE)
                 wh.begin = parallel_wall_handler
                 # 斜面(STAGE)との短冊接触も同じハンドラで監視する
-                sh = space.add_collision_handler(BAR_COLLISION_TYPE, STAGE_COLLISION_TYPE)
+                sh = _add_collision_handler(space, BAR_COLLISION_TYPE, STAGE_COLLISION_TYPE)
                 sh.begin = parallel_wall_handler
-                fh = space.add_collision_handler(BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE)
+                fh = _add_collision_handler(space, BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE)
                 fh.begin = parallel_floor_handler
             except:
                 pass
 
             # シミュレーション実行
             for step in range(int(SIMULATION_DURATION * 60)):
+                apply_release_force(bar.body, 1.0 / 60.0)
                 space.step(1.0 / 60.0)
-                
+
                 # 床接触の簡易判定（ハンドラーが動作しない場合のバックアップ）
                 if bar.body.position.y >= HEIGHT - 10:
                     floor_hit_flag[0] = True
@@ -2023,6 +1921,7 @@ def run_batch_mode_parallel():
                 'failures_multi_short': failure_reasons.get('multiple_short_contacts', 0),
                 'failures_unstable': failure_reasons.get('不安定', 0),
                 'failures_angle': failure_reasons.get('角度不正', 0),
+                'failures_position': failure_reasons.get('位置誤差大', 0),
                 'failures_no_contact': failure_reasons.get('未接触', 0),
                 'failures_invalid_pos': failure_reasons.get('invalid_initial_position', 0),
                 'x_offset_std': np.std(x_offsets),
@@ -2225,13 +2124,13 @@ def run_batch_mode():
             # 衝突ハンドラーの設定を試行
             try:
                 # 新しいAPIを試行
-                handler = space.add_collision_handler(BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE)
+                handler = _add_collision_handler(space, BAR_COLLISION_TYPE, FLOOR_COLLISION_TYPE)
                 handler.begin = collision_handler_floor
                 
-                wall_handler = space.add_collision_handler(BAR_COLLISION_TYPE, WALL_COLLISION_TYPE)
+                wall_handler = _add_collision_handler(space, BAR_COLLISION_TYPE, WALL_COLLISION_TYPE)
                 wall_handler.begin = collision_handler_wall
                 # 斜面(STAGE)との短冊接触も同じハンドラで監視する
-                stage_handler = space.add_collision_handler(BAR_COLLISION_TYPE, STAGE_COLLISION_TYPE)
+                stage_handler = _add_collision_handler(space, BAR_COLLISION_TYPE, STAGE_COLLISION_TYPE)
                 stage_handler.begin = collision_handler_wall
                 use_new_api = True
             except AttributeError:
@@ -2278,8 +2177,9 @@ def run_batch_mode():
             
             # シミュレーション実行
             for step in range(int(SIMULATION_DURATION * 60)):
+                apply_release_force(bar.body, 1.0 / 60.0)
                 space.step(1.0 / 60.0)
-                
+
                 # 衝突ハンドラーが使えない場合の代替判定
                 if use_new_api is None:
                     # 手動で衝突判定を行う
@@ -2372,6 +2272,7 @@ def run_batch_mode():
             'failures_multi_short': failure_reasons.get('multiple_short_contacts', 0),
             'failures_unstable': failure_reasons.get('不安定', 0),
             'failures_angle': failure_reasons.get('角度不正', 0),
+            'failures_position': failure_reasons.get('位置誤差大', 0),
             'failures_no_contact': failure_reasons.get('未接触', 0),
             'failures_invalid_pos': failure_reasons.get('invalid_initial_position', 0),
             'x_offset_std': np.std(x_offsets),
@@ -2403,6 +2304,7 @@ def run_batch_mode():
     print(f"  複数短冊接触: {df['failures_multi_short'].sum()}回") 
     print(f"  不安定: {df['failures_unstable'].sum()}回")
     print(f"  角度不正: {df['failures_angle'].sum()}回")
+    print(f"  位置誤差大: {df['failures_position'].sum()}回")
     print(f"  未接触: {df['failures_no_contact'].sum()}回")
     print(f"  不正初期位置: {df['failures_invalid_pos'].sum()}回")
     

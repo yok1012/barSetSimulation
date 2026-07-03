@@ -31,3 +31,9 @@ Thumbs.db
 
 # Results (optional - コメントアウトして管理する場合)
 # results*/
+
+.barsim_run_state.json
+run_log.txt
+
+# 大容量の一時解析結果ディレクトリ
+results_streamlit2/
