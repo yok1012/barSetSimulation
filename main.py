@@ -109,8 +109,19 @@ ANGLE_LINKED_OFFSET = False
 # シミュレーション内部の速度単位は px/s (= μm/s)。重力 space.gravity = 981 px/s²
 # を実重力 9.81 m/s² とみなすこのシミュレーションのスケールに合わせ、
 # 1 m/s = 100 px/s（VELOCITY_MPS_TO_SIM）で換算する。
+#
+# 初速度の「方向」の基準は RELEASE_VELOCITY_ANGLE_MODE で切り替える。
+#   "BAR_NORMAL": バー長手面の法線・下向きを 0° とする相対角（既定）。
+#                 バーは壁と平行に立つ姿勢で落下するため、その長手面の法線は
+#                 斜面と平行になり、下向き側は「斜面を下る向き」と一致する。
+#                 絶対角に直すと 180° − degrees(バー角度) = 180° + ステージ角度。
+#                 例) ステージ 45° → 225°、60° → 240°。
+#                 基準となるバー角度は実際のリリース角度（ステージ角度＋相対角度＋
+#                 角度バラツキ）なので、台座の斜面に応じて向きが自動的に回転する。
+#   "ABSOLUTE"  : 画面固定軸。0°=+X(右) / 90°=+Z(上) / 反時計回り（旧仕様）。
 RELEASE_VELOCITY_MPS = 0.0        # 初速度の大きさ [m/s]。0 で無効
-RELEASE_VELOCITY_ANGLE_DEG = 0.0  # 初速度の方向 [°]。0°=+X(右) / 90°=+Z(上) / 反時計回り
+RELEASE_VELOCITY_ANGLE_MODE = "BAR_NORMAL"  # "BAR_NORMAL" / "ABSOLUTE"
+RELEASE_VELOCITY_ANGLE_DEG = 0.0  # 初速度の方向 [°]。基準は上記モードに従う
 VELOCITY_MPS_TO_SIM = 100.0       # m/s → 内部速度 px/s の換算係数（重力スケール準拠）
 
 # --- BATCH ヒートマップの表示設定 ---
@@ -221,23 +232,40 @@ def create_bar(space, pos, angle, is_visual):
     shape.elasticity = BAR_ELASTICITY;
     shape.collision_type = BAR_COLLISION_TYPE
     if is_visual: shape.color = pygame.Color("dodgerblue")
-    body.velocity = release_velocity_vector()  # 脱着力による初速度（0なら静止状態からの落下）
+    # 脱着力による初速度（0なら静止状態からの落下）。
+    # 向きの基準はバー自身の姿勢に依存するため、リリース角度をそのまま渡す。
+    body.velocity = release_velocity_vector(angle)
     space.add(body, shape)
     return shape
 
 
-def release_velocity_vector():
+def release_velocity_base_angle_deg(bar_angle_rad):
+    """初速度の基準方向を絶対角 [°]（0°=+X, 90°=+Z, 反時計回り）で返す。
+
+    "BAR_NORMAL" モードではバー長手面の法線のうち下向き側を基準にする。
+    バーの長手軸はローカル +Y（= BAR_HEIGHT 方向）なので、その法線はローカル +X。
+    法線の下向き側をワールドで表すと 180° − degrees(bar_angle_rad) になる。
+    main では bar_angle_rad = radians(-ステージ角度 - 相対角度) なので、
+    結果は 180° + ステージ角度 + 相対角度 に一致する。
+    """
+    if RELEASE_VELOCITY_ANGLE_MODE == "BAR_NORMAL":
+        return 180.0 - math.degrees(bar_angle_rad)
+    return 0.0
+
+
+def release_velocity_vector(bar_angle_rad=0.0):
     """脱着力による初速度を内部単位 [px/s] のベクトルで返す。
 
     脱着時の力 F でワークへ加速度が与えられ、初期の落下方向が変化する現象のモデル。
     RELEASE_VELOCITY_MPS [m/s] を VELOCITY_MPS_TO_SIM 倍して内部速度に換算し、
-    RELEASE_VELOCITY_ANGLE_DEG の方向へ向ける。
-    画面座標は下向きが +Y なので、+Z(上) 成分は符号を反転する。
+    基準方向（release_velocity_base_angle_deg）から RELEASE_VELOCITY_ANGLE_DEG だけ
+    回した向きへ向ける。画面座標は下向きが +Y なので、+Z(上) 成分は符号を反転する。
     """
     if RELEASE_VELOCITY_MPS == 0:
         return (0.0, 0.0)
     speed = RELEASE_VELOCITY_MPS * VELOCITY_MPS_TO_SIM
-    rad = math.radians(RELEASE_VELOCITY_ANGLE_DEG)
+    rad = math.radians(release_velocity_base_angle_deg(bar_angle_rad)
+                       + RELEASE_VELOCITY_ANGLE_DEG)
     return (speed * math.cos(rad), -speed * math.sin(rad))
 
 
@@ -247,6 +275,7 @@ def release_velocity_vector():
 # タスクタプルに載せてワーカー側で復元する。
 WORKER_INHERITED_GLOBALS = (
     "RELEASE_VELOCITY_MPS",
+    "RELEASE_VELOCITY_ANGLE_MODE",
     "RELEASE_VELOCITY_ANGLE_DEG",
     "VELOCITY_MPS_TO_SIM",
     "BAR_FRICTION",

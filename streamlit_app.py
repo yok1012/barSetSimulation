@@ -103,7 +103,8 @@ def _setup_preview_font():
 
 
 def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
-                         velocity_mps=0.0, velocity_angle_deg=0.0):
+                         velocity_mps=0.0, velocity_angle_deg=0.0,
+                         velocity_angle_mode="BAR_NORMAL"):
     """台座・理想位置・落下開始位置を図示した matplotlib Figure と座標を返す。"""
     _setup_preview_font()
     import matplotlib.pyplot as plt
@@ -156,15 +157,25 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
                          ec="#1e90ff", zorder=4, label="バー(落下開始姿勢)"))
 
     # 脱着力による初速度の方向を矢印で図示（0°=+X(右) / 90°=+Z(上)。画面座標は Z↓ なので -sin）
+    # BAR_NORMAL モードではバー長手面の法線（下向き）が基準。main.release_velocity_base_angle_deg
+    # と同じ式（180° − degrees(バー角度)）をここでも使う。
     if velocity_mps > 0:
-        frad = math.radians(velocity_angle_deg)
+        if velocity_angle_mode == "BAR_NORMAL":
+            base_deg = 180.0 - math.degrees(release_angle_rad)
+            mode_note = "バー法線基準"
+        else:
+            base_deg = 0.0
+            mode_note = "絶対角"
+        abs_deg = base_deg + velocity_angle_deg
+        frad = math.radians(abs_deg)
         fdir = (math.cos(frad), -math.sin(frad))
         flen = max(300, IDEAL_RADIUS * 0.6)
         ax.annotate("", xy=(rel_x + fdir[0] * flen, rel_y + fdir[1] * flen),
                     xytext=(rel_x, rel_y),
                     arrowprops=dict(arrowstyle="-|>", color="crimson", lw=2.0))
         ax.plot([], [], color="crimson", lw=2.0,
-                label=f"脱着力の初速度 ({velocity_mps:.2f} m/s / {velocity_angle_deg:.0f}°)")
+                label=f"脱着力の初速度 ({velocity_mps:.2f} m/s / "
+                      f"{abs_deg % 360:.0f}° / {mode_note})")
 
     # マーカー（凡例にまとめ、図中への文字重なりを避ける）
     ax.scatter([BASE_X], [BASE_Y], c="red", marker="P", s=140, zorder=5, label="台座(BASE)")
@@ -677,11 +688,37 @@ with st.sidebar:
             value=float(S.get("release_velocity_mps", 0.0)), step=0.01, format="%.2f",
             help="リリース時にバー重心へ与える初速度の大きさ。小数第2位まで指定できます。",
         )
-        release_velocity_angle = st.number_input(
-            "初速度の方向 (°)", min_value=-180.0, max_value=360.0,
-            value=float(S.get("release_velocity_angle", 0.0)), step=5.0,
-            help="0°=+X(右)、90°=+Z(上)、反時計回り。画面固定軸です。",
+        _angle_mode_labels = {
+            "BAR_NORMAL": "バー法線連動（長手面の法線・下向き）",
+            "ABSOLUTE": "画面固定の絶対角",
+        }
+        _angle_mode_keys = list(_angle_mode_labels.keys())
+        _saved_angle_mode = S.get("release_velocity_angle_mode", "BAR_NORMAL")
+        release_velocity_angle_mode = st.radio(
+            "方向の基準",
+            _angle_mode_keys,
+            index=(_angle_mode_keys.index(_saved_angle_mode)
+                   if _saved_angle_mode in _angle_mode_keys else 0),
+            format_func=lambda m: _angle_mode_labels[m],
+            help="バー法線連動：バー長手面の法線のうち下向き側を 0° の基準にします。"
+            "バーは壁と平行に立つ姿勢で落下するため、この向きは斜面を下る向きと一致し、"
+            "ステージ角度に応じて自動で回転します（絶対角では 180°+ステージ角度）。"
+            "絶対角：画面固定軸を基準にする旧仕様です。",
         )
+        _bar_normal = release_velocity_angle_mode == "BAR_NORMAL"
+        release_velocity_angle = st.number_input(
+            "初速度の方向（基準からのオフセット, °）" if _bar_normal else "初速度の方向 (°)",
+            min_value=-180.0, max_value=360.0,
+            value=float(S.get("release_velocity_angle", 0.0)), step=5.0,
+            help="バー法線連動のときは法線（下向き）からのオフセット角です。0 で法線そのもの。"
+            if _bar_normal else "0°=+X(右)、90°=+Z(上)、反時計回り。画面固定軸です。",
+        )
+        if _bar_normal:
+            st.caption(
+                "基準方向の目安（オフセット0のとき）：ステージ 0° → 180° / "
+                "30° → 210° / 45° → 225° / 60° → 240°"
+            )
+
     with st.expander("摩擦係数・反発係数（跳ね返りの強さ）", expanded=False):
         st.caption(
             "落下したバーが接触時にどれだけ跳ねるかは反発係数で決まります。"
@@ -777,6 +814,7 @@ def common_cfg(angle_linked_offset):
         "release_velocity": {
             "mps": float(release_velocity_mps),
             "angle_deg": float(release_velocity_angle),
+            "angle_mode": str(release_velocity_angle_mode),
         },
         "physics": {
             "BAR_FRICTION": float(bar_friction),
@@ -804,6 +842,7 @@ S.update({
     "ideal_neighborhood_radius": float(ideal_neighborhood_radius),
     "release_velocity_mps": float(release_velocity_mps),
     "release_velocity_angle": float(release_velocity_angle),
+    "release_velocity_angle_mode": str(release_velocity_angle_mode),
     "bar_friction": float(bar_friction),
     "bar_elasticity": float(bar_elasticity),
     "wall_friction": float(wall_friction),
@@ -856,7 +895,8 @@ if mode in ("SINGLE", "INTERACTIVE"):
             _fig, _coords = build_layout_preview(int(angle), int(rx), int(ry),
                                                  bool(angle_linked_offset), int(rel),
                                                  float(release_velocity_mps),
-                                                 float(release_velocity_angle))
+                                                 float(release_velocity_angle),
+                                                 str(release_velocity_angle_mode))
             st.pyplot(_fig, use_container_width=True)
             import matplotlib.pyplot as _plt
             _plt.close(_fig)

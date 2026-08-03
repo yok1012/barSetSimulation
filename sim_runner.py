@@ -66,6 +66,9 @@ def _apply_overrides(cfg):
         main.RELEASE_VELOCITY_ANGLE_DEG = float(
             rv.get("angle_deg", main.RELEASE_VELOCITY_ANGLE_DEG)
         )
+        main.RELEASE_VELOCITY_ANGLE_MODE = str(
+            rv.get("angle_mode", main.RELEASE_VELOCITY_ANGLE_MODE)
+        )
 
     ho = cfg.get("heatmap_overlay")
     if ho:

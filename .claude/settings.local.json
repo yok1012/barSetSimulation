@@ -34,7 +34,9 @@
       "Bash(sed -i 's/\"simulation_duration\": 1.0/\"simulation_duration\": 4.0/' /tmp/cfg_bounce.json /tmp/cfg_bounce0.json)",
       "Bash(PYTHONIOENCODING=utf-8 python sim_runner.py /tmp/cfg_bounce.json)",
       "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
-      "Bash(git diff *)"
+      "Bash(git diff *)",
+      "Bash(rm -rf results_tmp_dir)",
+      "Bash(grep -vE \"use_container_width|^$|For .use_container\")"
     ],
     "deny": []
   }
