@@ -149,7 +149,8 @@ def draw_overlays(ax, x_positions, y_positions, angle_deg, angle_linked,
         _draw_ideal_bar(ax, x_positions, y_positions, to_offset, ideal_center,
                         stage_angle_rad, jp_font, opts)
     if opts.get("show_stage"):
-        _draw_stage(ax, x_positions, y_positions, to_offset, stage_angle_rad, jp_font)
+        _draw_stage(ax, x_positions, y_positions, to_offset, stage_angle_rad, jp_font,
+                    angle_linked)
 
 
 def _draw_ideal_bar(ax, x_positions, y_positions, to_offset, ideal_center,
@@ -292,8 +293,13 @@ def _draw_ideal_bar(ax, x_positions, y_positions, to_offset, ideal_center,
                 )
 
 
-def _draw_stage(ax, x_positions, y_positions, to_offset, stage_angle_rad, jp_font):
-    """Singleモードのプレビューと同じイメージで、壁・斜面（台座）・BASEマーカーを重ねる。"""
+def _draw_stage(ax, x_positions, y_positions, to_offset, stage_angle_rad, jp_font,
+                angle_linked=False):
+    """Singleモードのプレビューと同じイメージで、壁・斜面（台座）・BASEマーカーを重ねる。
+
+    angle_linked=True のときは軸自体がステージ傾斜に連動して回転するため、
+    斜面は常に水平・壁は常に垂直に描かれる（どの角度でも見た目が同じになるのは仕様）。
+    誤解を避けるため凡例にその旨を明記する。"""
 
     def map_point(px, py):
         ox, oz = to_offset(px, py)
@@ -366,8 +372,12 @@ def _draw_stage(ax, x_positions, y_positions, to_offset, stage_angle_rad, jp_fon
     ax.set_ylim(ylim)
     if any_visible:
         legend_kwargs = dict(loc="lower right", fontsize=8, framealpha=0.85)
+        if angle_linked:
+            legend_kwargs["title"] = "軸はステージ傾斜に連動\n（斜面=水平/壁=垂直 表示）"
         if jp_font:
             legend_font = jp_font.copy()
             legend_font.set_size(8)
             legend_kwargs["prop"] = legend_font
-        ax.legend(**legend_kwargs)
+        legend = ax.legend(**legend_kwargs)
+        if angle_linked and jp_font:
+            legend.get_title().set_fontproperties(legend_font)

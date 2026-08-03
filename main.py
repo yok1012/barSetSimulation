@@ -43,15 +43,31 @@ OUTPUT_DIR = "results_err_aws_8"
 JP_FONT_FILENAME = "ipaexg.ttf"
 
 # --- シミュレーション基本設定 ---
+# 摩擦係数 (friction) と反発係数 (elasticity) は接触する2つの面それぞれに設定する。
+# pymunk(Chipmunk) は衝突ペアの値を「掛け算」で合成するため、実際に効く反発係数は
+#   バー↔斜面/壁 = BAR_ELASTICITY * WALL_ELASTICITY
+#   バー↔床       = BAR_ELASTICITY * FLOOR_ELASTICITY
+#   バー↔安全柵   = BAR_ELASTICITY * BOUNDARY_ELASTICITY
+# となる（摩擦係数も同様に掛け算で合成される）。落下したバーの「跳ね」の大きさは
+# この実効反発係数と衝突時の速度（落下高さ・脱着力）で決まる。
 BAR_FRICTION = 1.5
 BAR_ELASTICITY = 0.6
-WALL_FRICTION = 1.2
+WALL_FRICTION = 1.2       # 斜面・壁面（実在するステージ面）
 WALL_ELASTICITY = 0.6
+FLOOR_FRICTION = 0.9      # 床（キャンバス下端。ここに落ちたら設置失敗）
+FLOOR_ELASTICITY = 0.5
+BOUNDARY_FRICTION = 0.5   # 上/左/右の安全柵（実在しない仮想の壁）
+BOUNDARY_ELASTICITY = 0.5
 INTERACTIVE_SUBSTEPS = 10
 BAR_HEIGHT = 0.001      # 1mm = 0.001m → 1000 pixels
 BAR_WIDTH = 0.0001      # 0.1mm = 0.0001m → 100 pixels
 BAR_MASS = 0.00000001   # 10^-8 kg (体積が10^-6倍になるため質量も調整)
 WIDTH, HEIGHT = 4000, 4000  # 4mm × 4mm (1 pixel = 1 μm)
+# 上/左/右の境界壁は「バーが無限遠に飛んでいかないための安全柵」であり、実在の壁ではない。
+# キャンバス端（0/WIDTH/HEIGHT）ぴったりに置くと、リリースZオフセットを大きくした際に
+# バーの初期位置がこの安全柵にめり込み、開始直後に不自然な反発（見た目上「上のオブジェクトに
+# 接触して弾かれる」ような挙動）を起こすため、想定される最大オフセットより十分外側に離しておく。
+BOUNDARY_MARGIN = 5000  # 安全柵をキャンバス端から離す距離 [μm]
 PPM = 1000000.0         # 1,000,000 pixels/m = 1 pixel/μm
 SIMULATION_DURATION = 4.0
 ENABLE_FLOOR_FAIL_VALIDATION = True
@@ -86,14 +102,16 @@ HEATMAP_OVERLAY_SIZE = 16      # バー寸法・中心・斜面/壁面などの�
 # True : ステージ傾斜に連動。Xオフセット=斜面方向, Yオフセット=壁方向に軸が回転する
 ANGLE_LINKED_OFFSET = False
 
-# --- 脱着力（リリース時にワークへ加わる力）設定 ---
-# 脱着時の力 F によってワークへ加速度が与えられ、初期の落下方向が変化する現象を
-# モデル化する。力の強さは加速度 [μm/s²] で指定し（バー質量に依存しない）、
-# リリース直後から RELEASE_FORCE_DURATION 秒間だけバー重心へ作用する。
-# 参考: このシミュレーションの重力加速度は space.gravity = 981 μm/s²。
-RELEASE_FORCE_ACCEL = 0.0       # 力の強さ（加速度）[μm/s²]。0 で無効
-RELEASE_FORCE_ANGLE_DEG = 0.0   # 力の方向 [°]。0°=+X(右) / 90°=+Z(上) / 反時計回り
-RELEASE_FORCE_DURATION = 0.1    # 力の作用時間 [s]
+# --- 脱着力（リリース時にワークへ与えられる初速度）設定 ---
+# 脱着時の力 F でワークへ加速度が与えられ、初期の落下方向が変化する現象を
+# 「リリース直後の初速度」としてモデル化する。力の強さは初速度 [m/s] で指定し
+# （小数第2位まで、バー質量に依存しない）、リリース時にバー重心へ一度だけ与える。
+# シミュレーション内部の速度単位は px/s (= μm/s)。重力 space.gravity = 981 px/s²
+# を実重力 9.81 m/s² とみなすこのシミュレーションのスケールに合わせ、
+# 1 m/s = 100 px/s（VELOCITY_MPS_TO_SIM）で換算する。
+RELEASE_VELOCITY_MPS = 0.0        # 初速度の大きさ [m/s]。0 で無効
+RELEASE_VELOCITY_ANGLE_DEG = 0.0  # 初速度の方向 [°]。0°=+X(右) / 90°=+Z(上) / 反時計回り
+VELOCITY_MPS_TO_SIM = 100.0       # m/s → 内部速度 px/s の換算係数（重力スケール準拠）
 
 # --- BATCH ヒートマップの表示設定 ---
 # 軸目盛りの最大表示数と、オーバーレイ（壁・斜面・理想バー・寸法矢印・基準線・
@@ -182,12 +200,13 @@ def setup_space(space, slope_angle_rad, is_visual):
     space.add(*static_shapes)
     floor = pymunk.Segment(static_body, (0, HEIGHT - 2), (WIDTH, HEIGHT - 2), 5)
     floor.collision_type = FLOOR_COLLISION_TYPE;
-    floor.friction = 0.9;
-    floor.elasticity = 0.5
-    other_walls = [pymunk.Segment(static_body, (0, 0), (WIDTH, 0), 5),
-                   pymunk.Segment(static_body, (0, 0), (0, HEIGHT), 5),
-                   pymunk.Segment(static_body, (WIDTH, 0), (WIDTH, HEIGHT), 5)]
-    for wall in other_walls: wall.friction = 0.5; wall.elasticity = 0.5
+    floor.friction = FLOOR_FRICTION;
+    floor.elasticity = FLOOR_ELASTICITY
+    m = BOUNDARY_MARGIN
+    other_walls = [pymunk.Segment(static_body, (-m, -m), (WIDTH + m, -m), 5),
+                   pymunk.Segment(static_body, (-m, -m), (-m, HEIGHT + m), 5),
+                   pymunk.Segment(static_body, (WIDTH + m, -m), (WIDTH + m, HEIGHT + m), 5)]
+    for wall in other_walls: wall.friction = BOUNDARY_FRICTION; wall.elasticity = BOUNDARY_ELASTICITY
     space.add(floor, *other_walls);
     static_shapes.extend([floor] + other_walls)
     return slope_segment, wall_segment, floor
@@ -202,27 +221,59 @@ def create_bar(space, pos, angle, is_visual):
     shape.elasticity = BAR_ELASTICITY;
     shape.collision_type = BAR_COLLISION_TYPE
     if is_visual: shape.color = pygame.Color("dodgerblue")
+    body.velocity = release_velocity_vector()  # 脱着力による初速度（0なら静止状態からの落下）
     space.add(body, shape)
     return shape
 
 
-def apply_release_force(bar_body, dt):
-    """脱着力をバー重心へ加える。毎ステップ space.step() の直前に呼ぶこと。
+def release_velocity_vector():
+    """脱着力による初速度を内部単位 [px/s] のベクトルで返す。
 
     脱着時の力 F でワークへ加速度が与えられ、初期の落下方向が変化する現象のモデル。
-    リリースからの経過時間は body の属性 release_force_elapsed で管理し、
-    RELEASE_FORCE_DURATION 秒を超えたら作用を終了する。
-    （pymunk の力は step ごとにリセットされるため、毎ステップ加え直す）
+    RELEASE_VELOCITY_MPS [m/s] を VELOCITY_MPS_TO_SIM 倍して内部速度に換算し、
+    RELEASE_VELOCITY_ANGLE_DEG の方向へ向ける。
+    画面座標は下向きが +Y なので、+Z(上) 成分は符号を反転する。
     """
-    if RELEASE_FORCE_ACCEL == 0:
+    if RELEASE_VELOCITY_MPS == 0:
+        return (0.0, 0.0)
+    speed = RELEASE_VELOCITY_MPS * VELOCITY_MPS_TO_SIM
+    rad = math.radians(RELEASE_VELOCITY_ANGLE_DEG)
+    return (speed * math.cos(rad), -speed * math.sin(rad))
+
+
+# BATCH_PARALLEL のワーカーへタスク同梱で引き継ぐグローバル名。
+# spawn 方式（Windows など）のワーカーは main.py を新規 import するため、
+# sim_runner が親プロセスで上書きした値は失われる。ここに挙げた設定だけは
+# タスクタプルに載せてワーカー側で復元する。
+WORKER_INHERITED_GLOBALS = (
+    "RELEASE_VELOCITY_MPS",
+    "RELEASE_VELOCITY_ANGLE_DEG",
+    "VELOCITY_MPS_TO_SIM",
+    "BAR_FRICTION",
+    "BAR_ELASTICITY",
+    "WALL_FRICTION",
+    "WALL_ELASTICITY",
+    "FLOOR_FRICTION",
+    "FLOOR_ELASTICITY",
+    "BOUNDARY_FRICTION",
+    "BOUNDARY_ELASTICITY",
+)
+
+
+def collect_worker_settings():
+    """WORKER_INHERITED_GLOBALS の現在値をタスク同梱用の dict にまとめる。"""
+    g = globals()
+    return {name: g[name] for name in WORKER_INHERITED_GLOBALS}
+
+
+def apply_worker_settings(settings):
+    """collect_worker_settings() の dict をワーカープロセス側のグローバルへ復元する。"""
+    if not settings:
         return
-    elapsed = getattr(bar_body, "release_force_elapsed", 0.0)
-    if elapsed < RELEASE_FORCE_DURATION:
-        rad = math.radians(RELEASE_FORCE_ANGLE_DEG)
-        fx = bar_body.mass * RELEASE_FORCE_ACCEL * math.cos(rad)
-        fy = -bar_body.mass * RELEASE_FORCE_ACCEL * math.sin(rad)  # 画面座標は +Z(上) = -Y
-        bar_body.apply_force_at_world_point((fx, fy), bar_body.position)
-    bar_body.release_force_elapsed = elapsed + dt
+    g = globals()
+    for name in WORKER_INHERITED_GLOBALS:
+        if name in settings:
+            g[name] = settings[name]
 
 
 def check_success(bar_shape, slope_segment, wall_segment, slope_angle_rad, floor_was_hit, settle_time=None):
@@ -1087,7 +1138,6 @@ def run_interactive_mode():
         pygame.display.flip()
         dt = 1.0 / 60.0
         for _ in range(INTERACTIVE_SUBSTEPS):
-            for _bar in dynamic_bars: apply_release_force(_bar.body, dt / INTERACTIVE_SUBSTEPS)
             space.step(dt / INTERACTIVE_SUBSTEPS)
         clock.tick(60)
     pygame.quit()
@@ -1177,7 +1227,6 @@ def run_single_condition_mode():
     trajectory = [(bar.body.position.x, bar.body.position.y)]
     bar_states = [(bar.body.position.x, bar.body.position.y, bar.body.angle)]
     for _ in range(int(SIMULATION_DURATION / (1.0 / 60.0))):
-        apply_release_force(bar.body, 1.0 / 60.0)
         space.step(1.0 / 60.0)
         if bar.body.position.y >= HEIGHT - 10:  # 床接触の簡易バックアップ判定
             floor_hit_flag[0] = True
@@ -1658,7 +1707,13 @@ def run_single_condition_parallel(params_data):
     """
     単一条件を並列処理で実行する関数
     """
-    current_params, trial_range = params_data
+    # spawn 方式のワーカーは main.py を新規 import するため、親プロセスで上書きされた
+    # 脱着力（初速度）や摩擦・反発係数の設定をタスク同梱の値から復元する。
+    if len(params_data) >= 3:
+        current_params, trial_range, worker_settings = params_data
+        apply_worker_settings(worker_settings)
+    else:
+        current_params, trial_range = params_data
     angle_deg = current_params['angle']
     rx_offset = current_params['release_x_offset']
     ry_offset = current_params['release_y_offset']
@@ -1750,7 +1805,6 @@ def run_single_condition_parallel(params_data):
 
             # シミュレーション実行
             for step in range(int(SIMULATION_DURATION * 60)):
-                apply_release_force(bar.body, 1.0 / 60.0)
                 space.step(1.0 / 60.0)
 
                 # 床接触の簡易判定（ハンドラーが動作しない場合のバックアップ）
@@ -1841,6 +1895,11 @@ def run_batch_mode_parallel():
     print(f"合計 {total_combinations} 通りのパラメータを、各{NUM_TRIALS_PER_CONDITION}回試行します。")
     print(f"総試行回数: {total_combinations * NUM_TRIALS_PER_CONDITION}")
     
+    # spawn 方式のワーカーは main.py を新規 import するため、sim_runner が親プロセスで
+    # 上書きしたモジュールグローバルは引き継がれない。脱着力（初速度）と
+    # 摩擦・反発係数の設定はタスクに同梱して各ワーカー側で復元する。
+    worker_settings = collect_worker_settings()
+
     # 各条件とその試行範囲をタスクとして準備
     tasks = []
     for params_tuple in param_combinations:
@@ -1857,7 +1916,7 @@ def run_batch_mode_parallel():
         
         # 各チャンクをタスクとして追加
         for chunk in trial_chunks:
-            tasks.append((current_params, chunk))
+            tasks.append((current_params, chunk, worker_settings))
     
     print(f"並列タスク数: {len(tasks)}")
     
@@ -2177,7 +2236,6 @@ def run_batch_mode():
             
             # シミュレーション実行
             for step in range(int(SIMULATION_DURATION * 60)):
-                apply_release_force(bar.body, 1.0 / 60.0)
                 space.step(1.0 / 60.0)
 
                 # 衝突ハンドラーが使えない場合の代替判定

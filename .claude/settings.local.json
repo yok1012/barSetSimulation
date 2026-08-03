@@ -28,7 +28,13 @@
       "PowerShell(python _test_preview.py 2>&1 | Select-Object -Last 1; python _test_ticks.py 2>&1 | Select-Object -Last 1)",
       "Bash(git push *)",
       "Bash(git fetch *)",
-      "Bash(git rebase *)"
+      "Bash(git rebase *)",
+      "Bash(sed 's/0.95/0.0/g' /tmp/cfg_bounce.json)",
+      "Bash(PYTHONIOENCODING=utf-8 python sim_runner.py /tmp/cfg_bounce0.json)",
+      "Bash(sed -i 's/\"simulation_duration\": 1.0/\"simulation_duration\": 4.0/' /tmp/cfg_bounce.json /tmp/cfg_bounce0.json)",
+      "Bash(PYTHONIOENCODING=utf-8 python sim_runner.py /tmp/cfg_bounce.json)",
+      "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
+      "Bash(git diff *)"
     ],
     "deny": []
   }

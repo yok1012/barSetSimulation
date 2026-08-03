@@ -49,14 +49,22 @@ def _apply_overrides(cfg):
     if "angle_linked_offset" in cfg:
         main.ANGLE_LINKED_OFFSET = bool(cfg["angle_linked_offset"])
 
-    rf = cfg.get("release_force")
-    if rf:
-        main.RELEASE_FORCE_ACCEL = float(rf.get("accel", main.RELEASE_FORCE_ACCEL))
-        main.RELEASE_FORCE_ANGLE_DEG = float(
-            rf.get("angle_deg", main.RELEASE_FORCE_ANGLE_DEG)
-        )
-        main.RELEASE_FORCE_DURATION = float(
-            rf.get("duration", main.RELEASE_FORCE_DURATION)
+    # 摩擦係数・反発係数（面ごと）。BATCH_PARALLEL でもワーカーへ引き継がれる
+    # （main.collect_worker_settings() 経由でタスクに同梱される）。
+    ph = cfg.get("physics")
+    if ph:
+        for key in ("BAR_FRICTION", "BAR_ELASTICITY",
+                    "WALL_FRICTION", "WALL_ELASTICITY",
+                    "FLOOR_FRICTION", "FLOOR_ELASTICITY",
+                    "BOUNDARY_FRICTION", "BOUNDARY_ELASTICITY"):
+            if key in ph:
+                setattr(main, key, float(ph[key]))
+
+    rv = cfg.get("release_velocity")
+    if rv:
+        main.RELEASE_VELOCITY_MPS = float(rv.get("mps", main.RELEASE_VELOCITY_MPS))
+        main.RELEASE_VELOCITY_ANGLE_DEG = float(
+            rv.get("angle_deg", main.RELEASE_VELOCITY_ANGLE_DEG)
         )
 
     ho = cfg.get("heatmap_overlay")

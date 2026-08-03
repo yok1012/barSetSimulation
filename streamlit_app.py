@@ -103,7 +103,7 @@ def _setup_preview_font():
 
 
 def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
-                         force_accel=0.0, force_angle_deg=0.0):
+                         velocity_mps=0.0, velocity_angle_deg=0.0):
     """台座・理想位置・落下開始位置を図示した matplotlib Figure と座標を返す。"""
     _setup_preview_font()
     import matplotlib.pyplot as plt
@@ -155,16 +155,16 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
     ax.add_patch(Polygon(bar_verts, closed=True, fill=False, ls="--", lw=1.5,
                          ec="#1e90ff", zorder=4, label="バー(落下開始姿勢)"))
 
-    # 脱着力の方向を矢印で図示（0°=+X(右) / 90°=+Z(上)。画面座標は Z↓ なので -sin）
-    if force_accel > 0:
-        frad = math.radians(force_angle_deg)
+    # 脱着力による初速度の方向を矢印で図示（0°=+X(右) / 90°=+Z(上)。画面座標は Z↓ なので -sin）
+    if velocity_mps > 0:
+        frad = math.radians(velocity_angle_deg)
         fdir = (math.cos(frad), -math.sin(frad))
         flen = max(300, IDEAL_RADIUS * 0.6)
         ax.annotate("", xy=(rel_x + fdir[0] * flen, rel_y + fdir[1] * flen),
                     xytext=(rel_x, rel_y),
                     arrowprops=dict(arrowstyle="-|>", color="crimson", lw=2.0))
         ax.plot([], [], color="crimson", lw=2.0,
-                label=f"脱着力F ({force_accel:.0f} μm/s² / {force_angle_deg:.0f}°)")
+                label=f"脱着力の初速度 ({velocity_mps:.2f} m/s / {velocity_angle_deg:.0f}°)")
 
     # マーカー（凡例にまとめ、図中への文字重なりを避ける）
     ax.scatter([BASE_X], [BASE_Y], c="red", marker="P", s=140, zorder=5, label="台座(BASE)")
@@ -664,26 +664,75 @@ with st.sidebar:
         value=bool(S.get("generate_gif", True)),
         help="ONの場合、単一条件実行後にバーの動きをGIFとして保存し、結果欄に表示します。",
     )
-    with st.expander("脱着力（リリース時にワークへ加わる力）", expanded=False):
+    with st.expander("脱着力（リリース時にワークへ与えられる初速度）", expanded=False):
         st.caption(
             "脱着時の力 F によりワークへ加速度が与えられ、初期の落下方向が変化する"
-            "現象を再現します。力の強さは加速度 [μm/s²] で指定します"
-            "（参考: シミュレーション内の重力加速度は 981 μm/s²）。0 で無効。"
+            "現象を、リリース直後の初速度として再現します。力の強さは初速度 [m/s] で"
+            "指定します（小数第2位まで）。0 で無効。"
+            "換算はシミュレーション内の重力スケール（981 px/s² = 9.81 m/s²）に合わせ、"
+            "1 m/s = 100 px/s (= 100 μm/s) です。"
         )
-        release_force_accel = st.number_input(
-            "力の強さ (μm/s²)", min_value=0.0, max_value=100000.0,
-            value=float(S.get("release_force_accel", 0.0)), step=50.0,
+        release_velocity_mps = st.number_input(
+            "初速度 (m/s)", min_value=0.00, max_value=100.00,
+            value=float(S.get("release_velocity_mps", 0.0)), step=0.01, format="%.2f",
+            help="リリース時にバー重心へ与える初速度の大きさ。小数第2位まで指定できます。",
         )
-        release_force_angle = st.number_input(
-            "力の方向 (°)", min_value=-180.0, max_value=360.0,
-            value=float(S.get("release_force_angle", 0.0)), step=5.0,
+        release_velocity_angle = st.number_input(
+            "初速度の方向 (°)", min_value=-180.0, max_value=360.0,
+            value=float(S.get("release_velocity_angle", 0.0)), step=5.0,
             help="0°=+X(右)、90°=+Z(上)、反時計回り。画面固定軸です。",
         )
-        release_force_duration = st.number_input(
-            "作用時間 (秒)", min_value=0.0, max_value=5.0,
-            value=float(S.get("release_force_duration", 0.1)), step=0.05,
-            help="リリース直後にこの時間だけ力が作用します。",
+    with st.expander("摩擦係数・反発係数（跳ね返りの強さ）", expanded=False):
+        st.caption(
+            "落下したバーが接触時にどれだけ跳ねるかは反発係数で決まります。"
+            "pymunk は接触する2面の値を掛け算で合成するため、実際に効くのは"
+            "「バー × 相手の面」の積です（摩擦係数も同様）。"
+            "反発係数は 0 で全く跳ねず、1 で完全弾性衝突（エネルギーが減らない）です。"
         )
+        st.markdown("**バー（短冊）**")
+        bar_friction = st.number_input(
+            "バー 摩擦係数", min_value=0.0, max_value=10.0,
+            value=float(S.get("bar_friction", 1.5)), step=0.1, format="%.2f",
+        )
+        bar_elasticity = st.number_input(
+            "バー 反発係数", min_value=0.0, max_value=1.0,
+            value=float(S.get("bar_elasticity", 0.6)), step=0.05, format="%.2f",
+        )
+        st.markdown("**斜面・壁面（ステージ）**")
+        wall_friction = st.number_input(
+            "斜面/壁 摩擦係数", min_value=0.0, max_value=10.0,
+            value=float(S.get("wall_friction", 1.2)), step=0.1, format="%.2f",
+        )
+        wall_elasticity = st.number_input(
+            "斜面/壁 反発係数", min_value=0.0, max_value=1.0,
+            value=float(S.get("wall_elasticity", 0.6)), step=0.05, format="%.2f",
+        )
+        st.markdown("**床（キャンバス下端）**")
+        floor_friction = st.number_input(
+            "床 摩擦係数", min_value=0.0, max_value=10.0,
+            value=float(S.get("floor_friction", 0.9)), step=0.1, format="%.2f",
+        )
+        floor_elasticity = st.number_input(
+            "床 反発係数", min_value=0.0, max_value=1.0,
+            value=float(S.get("floor_elasticity", 0.5)), step=0.05, format="%.2f",
+        )
+        st.markdown("**安全柵（上/左/右の仮想壁）**")
+        st.caption("実在する壁ではなく、バーが画面外へ飛んでいかないための柵です。")
+        boundary_friction = st.number_input(
+            "安全柵 摩擦係数", min_value=0.0, max_value=10.0,
+            value=float(S.get("boundary_friction", 0.5)), step=0.1, format="%.2f",
+        )
+        boundary_elasticity = st.number_input(
+            "安全柵 反発係数", min_value=0.0, max_value=1.0,
+            value=float(S.get("boundary_elasticity", 0.5)), step=0.05, format="%.2f",
+        )
+        st.info(
+            "実効反発係数（掛け算後）\n\n"
+            f"- バー ↔ 斜面/壁: **{bar_elasticity * wall_elasticity:.3f}**\n"
+            f"- バー ↔ 床: **{bar_elasticity * floor_elasticity:.3f}**\n"
+            f"- バー ↔ 安全柵: **{bar_elasticity * boundary_elasticity:.3f}**"
+        )
+
     with st.expander("接触判定の閾値", expanded=False):
         contact_count_threshold = st.number_input(
             "短冊方向 接触回数の閾値", min_value=1, max_value=50,
@@ -725,10 +774,19 @@ def common_cfg(angle_linked_offset):
         "ideal_neighborhood_radius": ideal_neighborhood_radius,
         "angle_linked_offset": bool(angle_linked_offset),
         "generate_gif": generate_gif,
-        "release_force": {
-            "accel": float(release_force_accel),
-            "angle_deg": float(release_force_angle),
-            "duration": float(release_force_duration),
+        "release_velocity": {
+            "mps": float(release_velocity_mps),
+            "angle_deg": float(release_velocity_angle),
+        },
+        "physics": {
+            "BAR_FRICTION": float(bar_friction),
+            "BAR_ELASTICITY": float(bar_elasticity),
+            "WALL_FRICTION": float(wall_friction),
+            "WALL_ELASTICITY": float(wall_elasticity),
+            "FLOOR_FRICTION": float(floor_friction),
+            "FLOOR_ELASTICITY": float(floor_elasticity),
+            "BOUNDARY_FRICTION": float(boundary_friction),
+            "BOUNDARY_ELASTICITY": float(boundary_elasticity),
         },
     }
 
@@ -744,9 +802,16 @@ S.update({
     "contact_count_threshold": int(contact_count_threshold),
     "contact_diff_threshold": float(contact_diff_threshold),
     "ideal_neighborhood_radius": float(ideal_neighborhood_radius),
-    "release_force_accel": float(release_force_accel),
-    "release_force_angle": float(release_force_angle),
-    "release_force_duration": float(release_force_duration),
+    "release_velocity_mps": float(release_velocity_mps),
+    "release_velocity_angle": float(release_velocity_angle),
+    "bar_friction": float(bar_friction),
+    "bar_elasticity": float(bar_elasticity),
+    "wall_friction": float(wall_friction),
+    "wall_elasticity": float(wall_elasticity),
+    "floor_friction": float(floor_friction),
+    "floor_elasticity": float(floor_elasticity),
+    "boundary_friction": float(boundary_friction),
+    "boundary_elasticity": float(boundary_elasticity),
 })
 
 
@@ -790,8 +855,8 @@ if mode in ("SINGLE", "INTERACTIVE"):
         try:
             _fig, _coords = build_layout_preview(int(angle), int(rx), int(ry),
                                                  bool(angle_linked_offset), int(rel),
-                                                 float(release_force_accel),
-                                                 float(release_force_angle))
+                                                 float(release_velocity_mps),
+                                                 float(release_velocity_angle))
             st.pyplot(_fig, use_container_width=True)
             import matplotlib.pyplot as _plt
             _plt.close(_fig)
