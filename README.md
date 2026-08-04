@@ -88,6 +88,13 @@ streamlit run streamlit_app.py
 | **SINGLE** | 1条件だけ実行し初期/最終状態を画像化 | PNG 1枚 |
 | **BATCH** | パラメータ範囲を総当たりで逐次探索 | CSV ＋ ヒートマップ |
 | **BATCH_PARALLEL** | BATCH をマルチコアで高速化（大量条件向け） | CSV ＋ ヒートマップ |
+| **BATCH_V2** | 条件を個別に並べて比較（1行＝1条件。条件ごとに全パラメータを設定） | CSV ＋ 条件別サマリ図 |
+| **BATCH_V2_PARALLEL** | BATCH_V2 をマルチコアで高速化 | CSV ＋ 条件別サマリ図 |
+
+### BATCH と BATCH_V2 の違い
+
+- **BATCH** … 角度・X・Z・相対角の**範囲の直積**で条件を自動生成する。格子状に並ぶのでヒートマップが作れる反面、条件ごとに物理係数やバラツキを変えることはできない。
+- **BATCH_V2** … 条件を**必要な数だけ手で並べる**。1条件ごとに、位置・角度・試行回数に加えてバラツキ／脱着力の初速度／摩擦・反発係数／シミュレーション時間／各種判定閾値まで個別指定できる。「反発係数だけ変えた条件を横並びで比較する」といった用途向け。格子状に並ばないためヒートマップは作らず、条件別の成功率を棒グラフにする。
 
 ---
 
@@ -108,14 +115,16 @@ streamlit run streamlit_app.py
 - `streamlit_app.py` … 操作UI本体
 - `sim_runner.py` … UIから呼ばれる実行ランナー（`main.py` のグローバル設定を上書きして各モードを起動。`main.py` 自体は変更しない）
 
-> **BATCH_PARALLEL の制限**: Windows の並列処理（spawn）では子プロセスが `main.py` を再 import するため、UIで変更した **バラツキ / シミュレーション時間 / 接触閾値 / 床接触判定** は反映されず `main.py` の既定値が使われます（**パラメータ範囲と試行回数は反映されます**）。これらを変えて探索したい場合は逐次 **BATCH** を使用してください。
+> **並列モードでの設定の引き継ぎ**: Windows の並列処理（spawn）では子プロセスが `main.py` を再 import するため、親プロセスで上書きしたグローバルは本来失われます。これを避けるため、`main.WORKER_INHERITED_GLOBALS` に挙げた設定（脱着力の初速度 / 摩擦・反発係数 / バラツキ / シミュレーション時間 / 各種判定閾値 / オフセット角度連動）は**タスクに同梱して各ワーカーで復元**しています。別の設定を並列でも効かせたい場合は、このタプルに名前を追加してください。
 
 ### 方法② main.py を直接実行
 `main.py` 冒頭の `MODE` を書き換えて実行します。
 
 ```python
-MODE = "INTERACTIVE"  # "BATCH" / "BATCH_PARALLEL" / "SINGLE"
+MODE = "INTERACTIVE"  # "BATCH" / "BATCH_PARALLEL" / "BATCH_V2" / "BATCH_V2_PARALLEL" / "SINGLE"
 ```
+BATCH_V2 を直接実行する場合は、`main.py` の `BATCH_V2_CONDITIONS` に条件の dict を並べます
+（指定できるキーは `BATCH_V2_PARAM_KEYS` と `BATCH_V2_GLOBAL_MAP` を参照。省略したキーは共通のグローバル設定が使われます）。
 ```powershell
 python main.py
 ```
@@ -243,11 +252,29 @@ BATCH_PARAM_RANGES = {
 - 逐次 BATCH … `simulation_results.csv`
 - 並列 BATCH_PARALLEL … `simulation_results_parallel.csv`
 
+### CSV 出力（BATCH_V2 / BATCH_V2_PARALLEL）
+上記の列に加えて、条件の識別と**その条件で実際に使われた設定値**が列として残ります。
+
+| 列名 | 説明 |
+|------|------|
+| `condition_index`, `label` | 条件番号と条件名 |
+| `num_trials`, `trials_done` | 指定した試行回数と、実際に完了した試行数 |
+| `simulation_duration`, `angle_linked_offset` | その条件で使われたシミュレーション時間・オフセット連動 |
+| `release_x_variability`, `release_y_variability`, `relative_angle_variability` | バラツキ設定 |
+| `release_velocity_mps`, `release_velocity_angle_deg`, `release_velocity_angle_mode` | 脱着力の初速度設定 |
+| `bar_*`, `wall_*`, `floor_*`, `boundary_*`（friction / elasticity） | 摩擦・反発係数 |
+| `enable_floor_fail`, `enable_no_contact_fail`, `contact_*_threshold`, `ideal_neighborhood_radius` | 判定設定 |
+
+ファイル名:
+- 逐次 BATCH_V2 … `simulation_results_v2.csv`
+- 並列 BATCH_V2_PARALLEL … `simulation_results_v2_parallel.csv`
+
 ### 可視化出力
 | ファイル | 内容 |
 |----------|------|
-| `success_rate_heatmaps.png` | 角度ごとに X-Y 位置別の成功率を一覧表示 |
-| `heatmap_interactive_angle_*deg.png` | 角度別の個別ヒートマップ（緑=高、黄=中、赤=低） |
+| `success_rate_heatmaps.png` | 角度ごとに X-Y 位置別の成功率を一覧表示（BATCH） |
+| `heatmap_interactive_angle_*deg.png` | 角度別の個別ヒートマップ（緑=高、黄=中、赤=低）（BATCH） |
+| `batch_v2_success_rates.png` | 条件別の成功率の棒グラフ（BATCH_V2） |
 | `single_condition_result.png` | SINGLE モードの結果画像（初期位置=青の半透明、最終位置を重ね描画） |
 
 ---

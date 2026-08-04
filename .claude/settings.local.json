@@ -36,7 +36,11 @@
       "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
       "Bash(git diff *)",
       "Bash(rm -rf results_tmp_dir)",
-      "Bash(grep -vE \"use_container_width|^$|For .use_container\")"
+      "Bash(grep -vE \"use_container_width|^$|For .use_container\")",
+      "Bash(sed 's/\"mode\": \"BATCH_V2\"/\"mode\": \"BATCH_V2_PARALLEL\"/; s|results_tmp_v2|results_tmp_v2p|' /tmp/cfg_v2.json)",
+      "Bash(PYTHONIOENCODING=utf-8 python sim_runner.py /tmp/cfg_v2p.json)",
+      "Bash(PYTHONIOENCODING=utf-8 python sim_runner.py /tmp/cfg_v2ui.json)",
+      "Bash(PYTHONIOENCODING=utf-8 python sim_runner.py _cfg_reg.json)"
     ],
     "deny": []
   }

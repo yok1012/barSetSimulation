@@ -91,6 +91,11 @@ def _apply_overrides(cfg):
     if "batch_ranges" in cfg and cfg["batch_ranges"]:
         main.BATCH_PARAM_RANGES = _build_batch_ranges(cfg["batch_ranges"])
 
+    # BATCH_V2: 条件リストをそのまま渡す。各条件のキーの意味は
+    # main.BATCH_V2_GLOBAL_MAP / BATCH_V2_PARAM_KEYS を参照。
+    if "conditions" in cfg and cfg["conditions"]:
+        main.BATCH_V2_CONDITIONS = [dict(c) for c in cfg["conditions"]]
+
 
 def _build_batch_ranges(br):
     """
@@ -127,6 +132,10 @@ def main_entry():
         main.run_batch_mode()
     elif mode == "BATCH_PARALLEL":
         main.run_batch_mode_parallel()
+    elif mode == "BATCH_V2":
+        main.run_batch_v2_mode()
+    elif mode == "BATCH_V2_PARALLEL":
+        main.run_batch_v2_mode_parallel()
     elif mode == "INTERACTIVE":
         main.run_interactive_mode()
     else:

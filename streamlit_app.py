@@ -67,10 +67,26 @@ def _bar_lower_left(pos, size, angle):
 
 
 def calc_ideal_position(angle_deg):
-    """理想位置 (ideal_x, ideal_y) を計算（main.calculate_ideal_position と同一）。"""
+    """理想位置 (ideal_x, ideal_y) を計算（main.calculate_ideal_position と同一）。
+
+    これは「バー中心（重心）」の座標であり、リリースオフセットの原点かつ
+    main.check_success の位置判定の基準でもある。
+    """
     ideal_angle_rad = math.radians(IDEAL_ANGLE_BASE_DEG - abs(angle_deg))
     return (BASE_X + IDEAL_RADIUS * math.cos(ideal_angle_rad),
             BASE_Y + IDEAL_RADIUS * math.sin(ideal_angle_rad))
+
+
+def calc_ideal_lower_left(angle_deg):
+    """理想位置に収まったバーの左下端座標を返す。
+
+    落下開始位置の表記（バー左下端）と定義を揃えるためのもの。
+    収まった状態のバー角度はステージ角度と一致する（main.check_success が
+    body.angle を slope_angle_rad と比較している）ので、その姿勢で左下端を取る。
+    """
+    return _bar_lower_left(calc_ideal_position(angle_deg),
+                           (BAR_WIDTH_UM, BAR_HEIGHT_UM),
+                           math.radians(-angle_deg))
 
 
 def compute_release_pos(angle_deg, x_offset, y_offset, angle_linked):
@@ -112,6 +128,10 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
 
     stage_angle_rad = math.radians(-angle_deg)
     ideal_x, ideal_y = calc_ideal_position(angle_deg)
+    # 理想位置はバー中心の座標なので、落下開始位置（バー左下端）と比較できるよう
+    # 収まった姿勢（角度＝ステージ角度）での左下端も求めておく。
+    ideal_lower_left = calc_ideal_lower_left(angle_deg)
+    ideal_verts = _rect_vertices((ideal_x, ideal_y), (BAR_WIDTH_UM, BAR_HEIGHT_UM), stage_angle_rad)
     rel_x, rel_y = compute_release_pos(angle_deg, rx, ry, angle_linked)
     # 落下開始時のバー姿勢（main: actual_release_angle = stage_angle + relative_angle）
     release_angle_rad = stage_angle_rad + math.radians(-rel_angle_deg)
@@ -147,10 +167,15 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
         ax.text(ideal_x + d[0] * (axis_len + 60), ideal_y + d[1] * (axis_len + 60),
                 lbl, color=color, fontsize=9, ha="center", va="center", bbox=bbox)
 
-    # 理想位置 → 落下開始位置（バー左下端）の参照線
-    if release_lower_left != (ideal_x, ideal_y):
-        ax.plot([ideal_x, release_lower_left[0]], [ideal_y, release_lower_left[1]],
+    # 理想位置（バー左下端）→ 落下開始位置（バー左下端）の参照線。両端とも同じ定義。
+    if release_lower_left != ideal_lower_left:
+        ax.plot([ideal_lower_left[0], release_lower_left[0]],
+                [ideal_lower_left[1], release_lower_left[1]],
                 color="orange", ls="--", lw=1.3, zorder=3)
+
+    # 理想位置に収まった姿勢のバー輪郭（左下端の定義を図でも分かるように）
+    ax.add_patch(Polygon(ideal_verts, closed=True, fill=False, ls=":", lw=1.2,
+                         ec="green", alpha=0.7, zorder=3, label="バー(理想位置姿勢)"))
 
     # 落下開始時のバーの輪郭を点線で図示
     ax.add_patch(Polygon(bar_verts, closed=True, fill=False, ls="--", lw=1.5,
@@ -179,14 +204,19 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
 
     # マーカー（凡例にまとめ、図中への文字重なりを避ける）
     ax.scatter([BASE_X], [BASE_Y], c="red", marker="P", s=140, zorder=5, label="台座(BASE)")
-    ax.scatter([ideal_x], [ideal_y], c="green", marker="+", s=240, linewidths=2.5,
-               zorder=5, label="理想位置")
+    ax.scatter([ideal_lower_left[0]], [ideal_lower_left[1]], c="green", marker="+", s=240,
+               linewidths=2.5, zorder=5, label="理想位置(バー左下端)")
+    ax.scatter([ideal_x], [ideal_y], facecolors="none", edgecolors="green", marker="o",
+               s=70, linewidths=1.2, alpha=0.8, zorder=5,
+               label="理想位置(バー中心＝オフセット原点)")
     ax.scatter([release_lower_left[0]], [release_lower_left[1]], facecolors="magenta", edgecolors="purple",
                marker="o", s=110, zorder=6, label="落下開始位置(バー左下端)")
 
     # 表示範囲（バー輪郭を含む全点を含めて少し余白）
-    xs = [BASE_X, slope_end[0], wall_end[0], ideal_x, release_lower_left[0]] + [v[0] for v in bar_verts]
-    ys = [BASE_Y, slope_end[1], wall_end[1], ideal_y, release_lower_left[1]] + [v[1] for v in bar_verts]
+    xs = ([BASE_X, slope_end[0], wall_end[0], ideal_x, ideal_lower_left[0], release_lower_left[0]]
+          + [v[0] for v in bar_verts] + [v[0] for v in ideal_verts])
+    ys = ([BASE_Y, slope_end[1], wall_end[1], ideal_y, ideal_lower_left[1], release_lower_left[1]]
+          + [v[1] for v in bar_verts] + [v[1] for v in ideal_verts])
     pad = max(200, (max(xs) - min(xs)) * 0.15, (max(ys) - min(ys)) * 0.15)
     ax.set_xlim(min(xs) - pad, max(xs) + pad)
     ax.set_ylim(min(ys) - pad, max(ys) + pad)
@@ -204,7 +234,8 @@ def build_layout_preview(angle_deg, rx, ry, angle_linked, rel_angle_deg=0,
 
     coords = {
         "base": (float(BASE_X), float(BASE_Y)),
-        "ideal": (ideal_x, ideal_y),
+        "ideal": ideal_lower_left,        # 落下開始位置と同じ「バー左下端」の定義
+        "ideal_center": (ideal_x, ideal_y),
         "release": release_lower_left,
         "release_center": (rel_x, rel_y),
     }
@@ -527,14 +558,18 @@ def show_results(mode, output_dir, show_gif=True):
             st.info("GIF生成はOFFです。")
         return
 
-    # BATCH / BATCH_PARALLEL
-    # 並列モードは simulation_results_parallel.csv を出力するが、psutil 等が無く
-    # 逐次版へフォールバックした場合は simulation_results.csv になる。両方を探す。
-    candidates = (
-        ["simulation_results_parallel.csv", "simulation_results.csv"]
-        if mode == "BATCH_PARALLEL"
-        else ["simulation_results.csv"]
-    )
+    # BATCH / BATCH_PARALLEL / BATCH_V2
+    # 並列モードは *_parallel.csv を出力するが、psutil 等が無く逐次版へ
+    # フォールバックした場合は逐次側のファイル名になる。両方を探す。
+    if mode in ("BATCH_V2", "BATCH_V2_PARALLEL"):
+        candidates = ["simulation_results_v2_parallel.csv", "simulation_results_v2.csv"] \
+            if mode == "BATCH_V2_PARALLEL" else ["simulation_results_v2.csv"]
+    else:
+        candidates = (
+            ["simulation_results_parallel.csv", "simulation_results.csv"]
+            if mode == "BATCH_PARALLEL"
+            else ["simulation_results.csv"]
+        )
     csv_name, csv_path = None, None
     for name in candidates:
         p = os.path.join(out, name)
@@ -553,6 +588,19 @@ def show_results(mode, output_dir, show_gif=True):
             st.warning(f"CSV 読込に失敗: {e}")
     else:
         st.info(f"結果CSV ({' / '.join(candidates)}) が見つかりませんでした。")
+
+    if mode in ("BATCH_V2", "BATCH_V2_PARALLEL"):
+        # BATCH_V2 の条件は格子状に並ばないためヒートマップは作られない。
+        summary = os.path.join(out, "batch_v2_success_rates.png")
+        if os.path.exists(summary):
+            st.markdown("**条件別サマリ**")
+            st.image(summary, caption="batch_v2_success_rates.png", use_container_width=True)
+            with open(summary, "rb") as f:
+                st.download_button("サマリ図 (PNG) をダウンロード", f,
+                                   file_name="batch_v2_success_rates.png", mime="image/png")
+        else:
+            st.info("条件別サマリ図が見つかりませんでした。")
+        return
 
     overview = os.path.join(out, "success_rate_heatmaps.png")
     if os.path.exists(overview):
@@ -641,6 +689,7 @@ MODE_LABELS = {
     "SINGLE": "SINGLE — 単一条件の結果画像を生成",
     "BATCH": "BATCH — パラメータ範囲を逐次探索 (CSV + ヒートマップ)",
     "BATCH_PARALLEL": "BATCH_PARALLEL — 並列探索 (高速)",
+    "BATCH_V2": "BATCH_V2 — 条件を個別指定して比較 (条件ごとに全パラメータ設定)",
     "INTERACTIVE": "INTERACTIVE — リアルタイム操作 (別ウィンドウで起動)",
 }
 
@@ -886,6 +935,7 @@ if mode in ("SINGLE", "INTERACTIVE"):
     # --- 実行前プレビュー：台座・理想位置・落下開始位置を図示して確認する ---
     st.markdown("#### 実行前プレビュー（座標確認）")
     _ideal_x, _ideal_y = calc_ideal_position(int(angle))
+    _ideal_ll_x, _ideal_ll_y = calc_ideal_lower_left(int(angle))
     _rel_x, _rel_y = compute_release_pos(int(angle), int(rx), int(ry), bool(angle_linked_offset))
     _release_angle_rad = math.radians(-int(angle)) + math.radians(-int(rel))
     _rel_ll_x, _rel_ll_y = _bar_lower_left((_rel_x, _rel_y), (BAR_WIDTH_UM, BAR_HEIGHT_UM), _release_angle_rad)
@@ -907,19 +957,21 @@ if mode in ("SINGLE", "INTERACTIVE"):
         # 横幅が狭いと1行では値が切れるため、点ごとに X / Y を2列×複数段で表示する。
         for _label, (_px, _py) in (
             ("台座(BASE)", (BASE_X, BASE_Y)),
-            ("理想位置", (_ideal_x, _ideal_y)),
+            ("理想位置（バー左下端）", (_ideal_ll_x, _ideal_ll_y)),
             ("落下開始位置（バー左下端）", (_rel_ll_x, _rel_ll_y)),
+            ("理想位置（バー中心＝オフセット原点）", (_ideal_x, _ideal_y)),
         ):
             st.markdown(f"**{_label}**")
             _cx, _cy = st.columns(2)
             _cx.metric("X (μm)", f"{_px:.1f}")
             _cy.metric("Z (μm)", f"{_py:.1f}")
-        _off_dist = math.hypot(_rel_ll_x - _ideal_x, _rel_ll_y - _ideal_y)
+        _off_dist = math.hypot(_rel_ll_x - _ideal_ll_x, _rel_ll_y - _ideal_ll_y)
         st.caption(
-            f"オフセット原点＝理想位置／"
-            f"{'ステージ角度に連動' if angle_linked_offset else '画面固定軸'}。"
-            f"表示上の落下開始位置はバー左下端です。"
-            f"理想位置→バー左下端の距離: {_off_dist:.1f} μm（{_off_dist / PPM * 1000:.3f} mm）"
+            f"理想位置・落下開始位置とも『バー左下端』で表記しています"
+            f"（理想位置の姿勢はステージ角度と同じ {int(angle)}°）。"
+            f"左下端どうしの距離: {_off_dist:.1f} μm（{_off_dist / PPM * 1000:.3f} mm）。"
+            f"／オフセットの原点は『理想位置のバー中心』で、"
+            f"{'ステージ角度に連動' if angle_linked_offset else '画面固定軸'}です。"
         )
 
     cfg = common_cfg(angle_linked_offset)
@@ -943,6 +995,148 @@ if mode in ("SINGLE", "INTERACTIVE"):
         if st.button("▶ 別ウィンドウで起動", type="primary"):
             run_interactive(cfg)
             st.success("別ウィンドウで起動しました。タスクバー/画面を確認してください。")
+
+elif mode == "BATCH_V2":
+    st.markdown(
+        "条件を**個別に**並べて比較するモードです。BATCH のような範囲の直積ではなく、"
+        "1行＝1条件として、シミュレーションに必要なパラメータを条件ごとに設定します。"
+    )
+    st.caption(
+        "空欄にした列はサイドバーの共通設定の値が使われます。"
+        "リリース X/Z オフセットは『理想位置』を原点(0,0)とした、ずらし量です。"
+    )
+
+    n1, n2 = st.columns([1, 2])
+    v2_count = n1.number_input(
+        "条件数", min_value=1, max_value=200,
+        value=int(S.get("v2_count", 4)), step=1,
+        help="この数まで行を増減します。増やした行は共通設定の値で初期化されます。",
+    )
+    v2_parallel = n2.checkbox(
+        "並列実行する（BATCH_V2_PARALLEL）",
+        value=bool(S.get("v2_parallel", True)),
+        help="条件×試行チャンク単位でプロセスに分配します。"
+        "条件ごとの設定はタスクに同梱してワーカーへ渡すため、並列でも正しく反映されます。",
+    )
+
+    # 表の1行ぶんの既定値（サイドバーの共通設定から作る）
+    def _v2_default_row(index):
+        return {
+            "label": f"条件{index + 1}",
+            "angle": 30.0,
+            "release_x_offset": 0.0,
+            "release_y_offset": 600.0,
+            "relative_angle": 0.0,
+            "num_trials": 10,
+            "simulation_duration": float(simulation_duration),
+            "angle_linked_offset": False,
+            "release_x_variability": 0.0,
+            "release_y_variability": 0.0,
+            "relative_angle_variability": 0.0,
+            "release_velocity_mps": float(release_velocity_mps),
+            "release_velocity_angle_deg": float(release_velocity_angle),
+            "release_velocity_angle_mode": str(release_velocity_angle_mode),
+            "bar_friction": float(bar_friction),
+            "bar_elasticity": float(bar_elasticity),
+            "wall_friction": float(wall_friction),
+            "wall_elasticity": float(wall_elasticity),
+            "floor_friction": float(floor_friction),
+            "floor_elasticity": float(floor_elasticity),
+            "boundary_friction": float(boundary_friction),
+            "boundary_elasticity": float(boundary_elasticity),
+            "enable_floor_fail": bool(enable_floor_fail),
+            "enable_no_contact_fail": bool(enable_no_contact_fail),
+            "contact_count_threshold": int(contact_count_threshold),
+            "contact_diff_threshold": float(contact_diff_threshold),
+            "ideal_neighborhood_radius": float(ideal_neighborhood_radius),
+        }
+
+    # 保存済みの条件表を復元しつつ、条件数に合わせて行を増減する
+    _saved_rows = S.get("v2_rows", [])
+    _rows = []
+    for i in range(int(v2_count)):
+        base = _v2_default_row(i)
+        if i < len(_saved_rows) and isinstance(_saved_rows[i], dict):
+            base.update({k: v for k, v in _saved_rows[i].items() if k in base})
+        _rows.append(base)
+
+    if st.button("共通設定を全行にコピー", help="サイドバーの共通設定の値で、位置・角度以外の列を上書きします。"):
+        for i, r in enumerate(_rows):
+            keep = {k: r[k] for k in ("label", "angle", "release_x_offset",
+                                      "release_y_offset", "relative_angle", "num_trials")}
+            _rows[i] = {**_v2_default_row(i), **keep}
+        S["v2_rows"] = _rows
+        save_settings(S)
+        st.rerun()
+
+    import pandas as _pd
+    _v2_df = _pd.DataFrame(_rows)
+    _num = st.column_config.NumberColumn
+    _v2_col_cfg = {
+        "label": st.column_config.TextColumn("条件名", width="small"),
+        "angle": _num("角度(°)", step=1.0, format="%.0f"),
+        "release_x_offset": _num("Xoff(μm)", step=5.0, format="%.0f"),
+        "release_y_offset": _num("Zoff(μm)", step=5.0, format="%.0f"),
+        "relative_angle": _num("相対角(°)", step=1.0, format="%.0f"),
+        "num_trials": _num("試行回数", min_value=1, step=1),
+        "simulation_duration": _num("シミュ時間(s)", min_value=0.5, step=0.5, format="%.1f"),
+        "angle_linked_offset": st.column_config.CheckboxColumn("オフセット角度連動"),
+        "release_x_variability": _num("σx(μm)", min_value=0.0, step=1.0, format="%.1f"),
+        "release_y_variability": _num("σz(μm)", min_value=0.0, step=1.0, format="%.1f"),
+        "relative_angle_variability": _num("σ角(°)", min_value=0.0, step=0.1, format="%.2f"),
+        "release_velocity_mps": _num("初速(m/s)", min_value=0.0, step=0.01, format="%.2f"),
+        "release_velocity_angle_deg": _num("初速方向(°)", step=5.0, format="%.1f"),
+        "release_velocity_angle_mode": st.column_config.SelectboxColumn(
+            "初速の基準", options=["BAR_NORMAL", "ABSOLUTE"]),
+        "bar_friction": _num("バー摩擦", min_value=0.0, step=0.1, format="%.2f"),
+        "bar_elasticity": _num("バー反発", min_value=0.0, max_value=1.0, step=0.05, format="%.2f"),
+        "wall_friction": _num("斜面/壁摩擦", min_value=0.0, step=0.1, format="%.2f"),
+        "wall_elasticity": _num("斜面/壁反発", min_value=0.0, max_value=1.0, step=0.05, format="%.2f"),
+        "floor_friction": _num("床摩擦", min_value=0.0, step=0.1, format="%.2f"),
+        "floor_elasticity": _num("床反発", min_value=0.0, max_value=1.0, step=0.05, format="%.2f"),
+        "boundary_friction": _num("安全柵摩擦", min_value=0.0, step=0.1, format="%.2f"),
+        "boundary_elasticity": _num("安全柵反発", min_value=0.0, max_value=1.0, step=0.05, format="%.2f"),
+        "enable_floor_fail": st.column_config.CheckboxColumn("床接触NG"),
+        "enable_no_contact_fail": st.column_config.CheckboxColumn("未接触NG"),
+        "contact_count_threshold": _num("接触回数閾値", min_value=1, step=1),
+        "contact_diff_threshold": _num("接触差分閾値", min_value=0.0, step=0.5, format="%.1f"),
+        "ideal_neighborhood_radius": _num("近傍除外半径(μm)", min_value=0.0, step=1.0, format="%.1f"),
+    }
+    st.markdown("**条件表**（← → 横スクロールで全パラメータ列にアクセスできます）")
+    _v2_edited = st.data_editor(
+        _v2_df,
+        column_config=_v2_col_cfg,
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key="v2_editor",
+    )
+
+    v2_conditions = _v2_edited.to_dict("records")
+    # numpy 型は JSON 化できないので Python の組み込み型へ落とす
+    v2_conditions = [{k: (v.item() if hasattr(v, "item") else v) for k, v in row.items()}
+                     for row in v2_conditions]
+
+    _total_trials = sum(int(c.get("num_trials", 10) or 10) for c in v2_conditions)
+    st.caption(f"条件数: {len(v2_conditions)} ／ 総試行回数: {_total_trials}")
+
+    with st.expander("条件セットの JSON（確認・控え用）", expanded=False):
+        st.json(v2_conditions)
+
+    S.update({
+        "v2_count": int(v2_count),
+        "v2_parallel": bool(v2_parallel),
+        "v2_rows": v2_conditions,
+    })
+
+    cfg = common_cfg(False)
+    cfg["mode"] = "BATCH_V2_PARALLEL" if v2_parallel else "BATCH_V2"
+    cfg["conditions"] = v2_conditions
+
+    if st.button("▶ 並列実行" if v2_parallel else "▶ 逐次実行",
+                 type="primary", disabled=_run_state_active()):
+        start_background_run(cfg, show_gif=False)
+        st.rerun()
 
 else:  # BATCH / BATCH_PARALLEL
     st.markdown("探索するパラメータ範囲（開始・終了・刻み）を指定します。`range()` と同様、終了値は含みません。")
@@ -972,8 +1166,7 @@ else:  # BATCH / BATCH_PARALLEL
         "オフセットをステージ角度に連動させる",
         value=bool(S.get("angle_linked_offset", False)),
         help="リリースオフセットの原点は常に『理想位置』です（offset=0 → リリース位置＝理想位置）。"
-        "ON にすると、その軸がステージ傾斜に合わせて回転します（Xオフセット=斜面方向 / Zオフセット=壁方向）。"
-        "※ BATCH_PARALLEL では main.py の既定値が使われ、この指定は反映されません。",
+        "ON にすると、その軸がステージ傾斜に合わせて回転します（Xオフセット=斜面方向 / Zオフセット=壁方向）。",
     )
     S.update({"angle_linked_offset": bool(angle_linked_offset)})
 
@@ -1068,10 +1261,10 @@ else:  # BATCH / BATCH_PARALLEL
         st.caption("範囲指定を確認してください。")
 
     if mode == "BATCH_PARALLEL":
-        st.warning(
-            "並列モードでは **バラツキ / シミュレーション時間 / 接触閾値 / 理想位置近傍除外 / 床接触判定 / オフセット角度連動** は "
-            "main.py の既定値が使われます（パラメータ範囲と試行回数は反映されます）。"
-            "これらを変更して探索したい場合は逐次 BATCH を使用してください。"
+        st.info(
+            "並列モードでも、バラツキ / シミュレーション時間 / 接触閾値 / 理想位置近傍除外 / "
+            "床接触・未接触判定 / オフセット角度連動 / 脱着力 / 摩擦・反発係数 は"
+            "ワーカーへ引き継がれます（タスクに同梱して各プロセスで復元しています）。"
         )
 
     S.update({

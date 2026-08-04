@@ -147,6 +147,42 @@ RELATIVE_ANGLE_VARIABILITY = 1.0  # 相対角度のバラツキ（度）
 NUM_TRIALS_PER_CONDITION = 10  # 各条件での試行回数
 SINGLE_CONDITION_PARAMS = {'angle': 30, 'release_x_offset': 0, 'release_y_offset': 600, 'relative_angle': 0}
 
+# --- BATCH_V2（条件リスト指定モード）---
+# BATCH が範囲の直積で条件を自動生成するのに対し、BATCH_V2 は「条件そのもの」を
+# 任意個並べ、シミュレーションに必要なパラメータを条件ごとに個別指定する。
+# 各要素は dict で、位置・角度のキー（angle / release_x_offset / release_y_offset /
+# relative_angle / num_trials）に加えて BATCH_V2_GLOBAL_MAP のキーを持てる。
+# 省略したキーは main のモジュールグローバル（＝共通設定）の値が使われる。
+BATCH_V2_CONDITIONS = []
+
+# 条件 dict のキー -> (上書きする main のグローバル名, 型変換関数)
+BATCH_V2_GLOBAL_MAP = {
+    "simulation_duration":         ("SIMULATION_DURATION", float),
+    "angle_linked_offset":         ("ANGLE_LINKED_OFFSET", bool),
+    "enable_floor_fail":           ("ENABLE_FLOOR_FAIL_VALIDATION", bool),
+    "enable_no_contact_fail":      ("ENABLE_NO_CONTACT_FAIL", bool),
+    "contact_count_threshold":     ("CONTACT_COUNT_THRESHOLD", int),
+    "contact_diff_threshold":      ("CONTACT_DIFF_THRESHOLD", float),
+    "ideal_neighborhood_radius":   ("IDEAL_NEIGHBORHOOD_RADIUS", float),
+    "release_x_variability":       ("RELEASE_X_VARIABILITY", float),
+    "release_y_variability":       ("RELEASE_Y_VARIABILITY", float),
+    "relative_angle_variability":  ("RELATIVE_ANGLE_VARIABILITY", float),
+    "release_velocity_mps":        ("RELEASE_VELOCITY_MPS", float),
+    "release_velocity_angle_deg":  ("RELEASE_VELOCITY_ANGLE_DEG", float),
+    "release_velocity_angle_mode": ("RELEASE_VELOCITY_ANGLE_MODE", str),
+    "bar_friction":                ("BAR_FRICTION", float),
+    "bar_elasticity":              ("BAR_ELASTICITY", float),
+    "wall_friction":               ("WALL_FRICTION", float),
+    "wall_elasticity":             ("WALL_ELASTICITY", float),
+    "floor_friction":              ("FLOOR_FRICTION", float),
+    "floor_elasticity":            ("FLOOR_ELASTICITY", float),
+    "boundary_friction":           ("BOUNDARY_FRICTION", float),
+    "boundary_elasticity":         ("BOUNDARY_ELASTICITY", float),
+}
+
+# 条件の位置・角度キー（BATCH_V2_GLOBAL_MAP とは別に params として扱う）
+BATCH_V2_PARAM_KEYS = ("angle", "release_x_offset", "release_y_offset", "relative_angle")
+
 # --- 衝突判定用の種別ID ---
 BAR_COLLISION_TYPE = 1;
 STAGE_COLLISION_TYPE = 2;
@@ -286,6 +322,18 @@ WORKER_INHERITED_GLOBALS = (
     "FLOOR_ELASTICITY",
     "BOUNDARY_FRICTION",
     "BOUNDARY_ELASTICITY",
+    # 以下は BATCH_V2 で条件ごとに切り替えるために追加したもの。
+    # 従来の BATCH_PARALLEL でもワーカーへ引き継がれるようになる。
+    "SIMULATION_DURATION",
+    "ANGLE_LINKED_OFFSET",
+    "ENABLE_FLOOR_FAIL_VALIDATION",
+    "ENABLE_NO_CONTACT_FAIL",
+    "CONTACT_COUNT_THRESHOLD",
+    "CONTACT_DIFF_THRESHOLD",
+    "IDEAL_NEIGHBORHOOD_RADIUS",
+    "RELEASE_X_VARIABILITY",
+    "RELEASE_Y_VARIABILITY",
+    "RELATIVE_ANGLE_VARIABILITY",
 )
 
 
@@ -2415,6 +2463,265 @@ def run_batch_mode():
         print("ヒートマップの生成が完了しました。")
 
 
+### --- BATCH_V2: 条件リスト指定モード --- ###
+
+def build_v2_condition_params(cond, index):
+    """条件 dict から、試行実行に渡す params（位置・角度）を組み立てる。
+
+    condition_index を含めるのは、位置・角度が同一でも物理係数だけ違う条件を
+    別条件として集計するための識別子が必要なため。CSV にもそのまま列として残る。
+    """
+    return {
+        'condition_index': index + 1,
+        'label': str(cond.get('label', f"条件{index + 1}")),
+        'angle': float(cond.get('angle', SINGLE_CONDITION_PARAMS['angle'])),
+        'release_x_offset': float(cond.get('release_x_offset', 0)),
+        'release_y_offset': float(cond.get('release_y_offset', 0)),
+        'relative_angle': float(cond.get('relative_angle', 0)),
+    }
+
+
+def build_v2_condition_settings(cond, base_settings):
+    """条件 dict の指定で base_settings（共通設定）を上書いた設定 dict を返す。
+
+    未指定のキーは共通設定のままになる。戻り値は apply_worker_settings() が
+    そのまま受け取れる形式なので、逐次・並列どちらでも同じ経路で反映できる。
+    """
+    settings = dict(base_settings)
+    for key, (global_name, caster) in BATCH_V2_GLOBAL_MAP.items():
+        if key in cond and cond[key] is not None:
+            try:
+                settings[global_name] = caster(cond[key])
+            except (TypeError, ValueError):
+                print(f"警告: 条件の '{key}' の値 {cond[key]!r} を変換できないため共通設定を使います。")
+    return settings
+
+
+def v2_settings_columns(settings):
+    """CSV に「実際に使われた設定」を残すための列を作る。"""
+    return {key: settings[global_name]
+            for key, (global_name, _caster) in BATCH_V2_GLOBAL_MAP.items()
+            if global_name in settings}
+
+
+def summarize_condition_result(params, successful_runs_data, trial_results, num_trials):
+    """1条件分の試行結果を、CSV 1行ぶんの dict へ集計する。
+
+    集計内容は run_batch_mode の condition_result と揃えてある。
+    """
+    stage_angle_rad = math.radians(-params['angle'])
+    success_rate = (len(successful_runs_data) / num_trials) * 100 if num_trials > 0 else 0
+
+    failure_reasons = {}
+    for result in trial_results:
+        if not result['success']:
+            reason = result['reason']
+            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+
+    short_contact_counts = [result['short_contacts'] for result in trial_results]
+    avg_short_contacts = np.mean(short_contact_counts) if short_contact_counts else 0
+    max_short_contacts = max(short_contact_counts) if short_contact_counts else 0
+
+    ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
+    avg_final_x = np.mean([run['pos'][0] for run in successful_runs_data]) if successful_runs_data else None
+    avg_final_y = np.mean([run['pos'][1] for run in successful_runs_data]) if successful_runs_data else None
+    diff = (math.sqrt((ideal_x - avg_final_x) ** 2 + (ideal_y - avg_final_y) ** 2)
+            if avg_final_x is not None else None)
+
+    x_offsets = [result['x_offset'] for result in trial_results]
+    y_offsets = [result['y_offset'] for result in trial_results]
+    angle_offsets = [result['angle_offset'] for result in trial_results]
+
+    return {
+        **params,
+        'num_trials': num_trials,
+        'trials_done': len(trial_results),
+        'success_rate': success_rate,
+        'ideal_x': ideal_x, 'ideal_y': ideal_y,
+        'avg_final_x': avg_final_x, 'avg_final_y': avg_final_y,
+        'difference_from_ideal_px': diff,
+        'avg_short_contacts': avg_short_contacts,
+        'max_short_contacts': max_short_contacts,
+        'failures_floor': failure_reasons.get('floor_contact', 0),
+        'failures_multi_short': failure_reasons.get('multiple_short_contacts', 0),
+        'failures_unstable': failure_reasons.get('不安定', 0),
+        'failures_angle': failure_reasons.get('角度不正', 0),
+        'failures_position': failure_reasons.get('位置誤差大', 0),
+        'failures_no_contact': failure_reasons.get('未接触', 0),
+        'failures_invalid_pos': failure_reasons.get('invalid_initial_position', 0),
+        'x_offset_std': np.std(x_offsets) if x_offsets else 0.0,
+        'y_offset_std': np.std(y_offsets) if y_offsets else 0.0,
+        'angle_offset_std': np.std(angle_offsets) if angle_offsets else 0.0,
+    }
+
+
+def describe_v2_condition(params, num_trials):
+    return (f"{params['label']}: 角度{params['angle']:g}°, 相対{params['relative_angle']:g}°, "
+            f"リリース(x,z)=({params['release_x_offset']:g}, {params['release_y_offset']:g}), "
+            f"{num_trials}回")
+
+
+def generate_batch_v2_summary_chart(df):
+    """条件別の成功率を棒グラフ PNG として出力する。
+
+    BATCH_V2 の条件は格子状に並ばないためヒートマップは作れない。
+    条件どうしを見比べられるよう、条件番号を横軸にした棒グラフにする。
+    """
+    if not LIBRARIES_INSTALLED or df.empty:
+        return None
+    from matplotlib.font_manager import FontProperties
+    try:
+        jp_font = FontProperties(fname=JP_FONT_FILENAME)
+    except Exception:
+        jp_font = None
+
+    labels = [f"{int(r.condition_index)}. {r.label}" for r in df.itertuples()]
+    fig_w = max(7.0, len(df) * 0.9)
+    fig, ax = plt.subplots(figsize=(fig_w, 5.5))
+    bars = ax.bar(range(len(df)), df['success_rate'], color="#4c78a8")
+    for rect, rate in zip(bars, df['success_rate']):
+        ax.text(rect.get_x() + rect.get_width() / 2, rect.get_height() + 1.5,
+                f"{rate:.0f}%", ha="center", va="bottom", fontsize=9)
+    ax.set_xticks(range(len(df)))
+    ax.set_xticklabels(labels, rotation=30, ha="right",
+                       fontproperties=jp_font, fontsize=9)
+    ax.set_ylim(0, 105)
+    ax.grid(axis="y", ls=":", alpha=0.5)
+    if jp_font:
+        ax.set_ylabel("成功率 (%)", fontproperties=jp_font, fontsize=12)
+        ax.set_title("条件別の成功率（BATCH_V2）", fontproperties=jp_font, fontsize=14)
+    else:
+        ax.set_ylabel("success rate (%)"); ax.set_title("success rate by condition (BATCH_V2)")
+    fig.tight_layout()
+    path = os.path.join(OUTPUT_DIR, "batch_v2_success_rates.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"- 条件別サマリ図: {path}")
+    return path
+
+
+def finalize_batch_v2(results_data, csv_name):
+    """集計結果を CSV とサマリ図に出力する。"""
+    if not results_data:
+        print("試行結果がありません。")
+        return
+    df = pd.DataFrame(results_data).sort_values("condition_index").reset_index(drop=True)
+    if 'difference_from_ideal_px' in df.columns:
+        df['difference_from_ideal_mm'] = df['difference_from_ideal_px'] / PPM
+
+    print("\n=== BATCH_V2 実行結果概要 ===")
+    print(f"条件数: {len(df)}")
+    print(f"総試行回数: {int(df['trials_done'].sum())}")
+    print(f"全体成功率: {df['success_rate'].mean():.1f}% "
+          f"(範囲: {df['success_rate'].min():.1f}%-{df['success_rate'].max():.1f}%)")
+    print("\n条件別成功率:")
+    for row in df.itertuples():
+        print(f"  [{int(row.condition_index)}] {row.label}: {row.success_rate:.1f}% "
+              f"(短冊接触 平均{row.avg_short_contacts:.2f}回)")
+
+    best = df.loc[df['success_rate'].idxmax()]
+    print(f"\n最高成功率の条件: [{int(best['condition_index'])}] {best['label']} "
+          f"→ {best['success_rate']:.1f}%")
+
+    csv_filepath = os.path.join(OUTPUT_DIR, csv_name)
+    df.to_csv(csv_filepath, index=False, float_format='%.3f')
+    print(f"\n詳細結果を '{csv_filepath}' に保存しました。")
+    generate_batch_v2_summary_chart(df)
+
+
+def run_batch_v2_mode():
+    """条件リストを逐次実行する（BATCH_V2）。"""
+    if not LIBRARIES_INSTALLED:
+        print("エラー: BATCH_V2モードに必要なライブラリがありません。")
+        return
+    conditions = list(BATCH_V2_CONDITIONS)
+    if not conditions:
+        print("エラー: BATCH_V2_CONDITIONS が空です。条件を1つ以上指定してください。")
+        return
+
+    print("=== BATCH_V2（条件リスト指定）モードを開始します ===")
+    print(f"条件数: {len(conditions)}")
+    # 条件ごとの上書きは apply_worker_settings がグローバルを書き換えるため、
+    # 「共通設定」のスナップショットを先に取り、毎回そこから作り直す。
+    base_settings = collect_worker_settings()
+    results_data = []
+    try:
+        for i, cond in enumerate(conditions):
+            params = build_v2_condition_params(cond, i)
+            num_trials = max(1, int(cond.get('num_trials', NUM_TRIALS_PER_CONDITION)))
+            settings = build_v2_condition_settings(cond, base_settings)
+            print(f"[{i + 1}/{len(conditions)}] {describe_v2_condition(params, num_trials)} ... ",
+                  end="", flush=True)
+            _params, successful_runs_data, trial_results = run_single_condition_parallel(
+                (params, list(range(1, num_trials + 1)), settings))
+            row = summarize_condition_result(params, successful_runs_data, trial_results, num_trials)
+            row.update(v2_settings_columns(settings))
+            results_data.append(row)
+            print(f"{row['success_rate']:.0f}% (短冊接触: {row['avg_short_contacts']:.1f}回)")
+    finally:
+        # 条件ごとの上書きを共通設定へ戻す
+        apply_worker_settings(base_settings)
+
+    finalize_batch_v2(results_data, "simulation_results_v2.csv")
+
+
+def run_batch_v2_mode_parallel():
+    """条件リストを並列実行する（BATCH_V2）。条件×試行チャンク単位で分配する。"""
+    if not LIBRARIES_INSTALLED:
+        print("エラー: BATCH_V2モードに必要なライブラリがありません。")
+        return
+    if not PARALLEL_AVAILABLE:
+        print("警告: 並列処理ライブラリが利用できません。逐次のBATCH_V2を実行します。")
+        return run_batch_v2_mode()
+    conditions = list(BATCH_V2_CONDITIONS)
+    if not conditions:
+        print("エラー: BATCH_V2_CONDITIONS が空です。条件を1つ以上指定してください。")
+        return
+
+    cpu_cores = cpu_count()
+    max_workers = min(cpu_cores, 64)
+    print("=== BATCH_V2（条件リスト指定・並列）モードを開始します ===")
+    print(f"条件数: {len(conditions)} / 利用可能CPU数: {cpu_cores}, 使用プロセス数: {max_workers}")
+
+    base_settings = collect_worker_settings()
+    tasks = []
+    meta = {}  # condition_index -> (params, num_trials, settings)
+    for i, cond in enumerate(conditions):
+        params = build_v2_condition_params(cond, i)
+        num_trials = max(1, int(cond.get('num_trials', NUM_TRIALS_PER_CONDITION)))
+        settings = build_v2_condition_settings(cond, base_settings)
+        meta[params['condition_index']] = (params, num_trials, settings)
+        # 条件ごとの設定はタスクに同梱するので、spawn 方式のワーカーでも正しく効く。
+        trials_per_chunk = max(1, num_trials // max_workers)
+        for start in range(0, num_trials, trials_per_chunk):
+            end_trial = min(start + trials_per_chunk, num_trials)
+            tasks.append((params, list(range(start + 1, end_trial + 1)), settings))
+
+    print(f"並列タスク数: {len(tasks)}")
+    collected = {idx: {'successful': [], 'trials': []} for idx in meta}
+    start_time = time.time()
+    with Pool(processes=max_workers) as pool:
+        for done, (params, successful_runs_data, trial_results) in enumerate(
+                pool.imap_unordered(run_single_condition_parallel, tasks), start=1):
+            bucket = collected[params['condition_index']]
+            bucket['successful'].extend(successful_runs_data)
+            bucket['trials'].extend(trial_results)
+            if done % 10 == 0 or done == len(tasks):
+                print(f"  進捗: {done}/{len(tasks)} タスク完了 "
+                      f"({time.time() - start_time:.1f}秒経過)", flush=True)
+
+    results_data = []
+    for idx in sorted(meta):
+        params, num_trials, settings = meta[idx]
+        bucket = collected[idx]
+        row = summarize_condition_result(params, bucket['successful'], bucket['trials'], num_trials)
+        row.update(v2_settings_columns(settings))
+        results_data.append(row)
+        print(f"[{idx}] {params['label']}: {row['success_rate']:.0f}%")
+
+    finalize_batch_v2(results_data, "simulation_results_v2_parallel.csv")
+
+
 if __name__ == "__main__":
     if not os.path.exists(OUTPUT_DIR): os.makedirs(OUTPUT_DIR)
     if MODE == "INTERACTIVE":
@@ -2423,6 +2730,10 @@ if __name__ == "__main__":
         run_batch_mode()
     elif MODE == "BATCH_PARALLEL":
         run_batch_mode_parallel()
+    elif MODE == "BATCH_V2":
+        run_batch_v2_mode()
+    elif MODE == "BATCH_V2_PARALLEL":
+        run_batch_v2_mode_parallel()
     elif MODE == "SINGLE":
         run_single_condition_mode()
     else:
