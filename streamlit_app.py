@@ -525,6 +525,13 @@ def show_results(mode, output_dir, show_gif=True):
         return
 
     st.subheader("実行結果")
+    maps = sorted(glob.glob(os.path.join(out, "*_error_stage_*.png")))
+    if maps:
+        st.caption("位置は理想重心からの距離、傾きは理想軸からの角度差の平均です。成功・失敗を含む指定時間終了時の値です。")
+        selected_map = st.selectbox("ズレ量カラーマップ", maps, format_func=os.path.basename)
+        st.image(selected_map)
+        with open(selected_map, "rb") as image_file:
+            st.download_button("カラーマップPNGを保存", image_file.read(), file_name=os.path.basename(selected_map), mime="image/png")
 
     if mode == "SINGLE":
         pngs = sorted(
@@ -711,7 +718,7 @@ with st.sidebar:
                                 disabled=os.name != "posix")
     aws_workers, aws_chunk, aws_seed = 0, 50, 2026
     if aws_execution:
-        st.caption("BATCH系は独立ワーカーで並列実行します。出力先は実行ごとに自動作成し、PNG/GIFは生成しません。")
+        st.caption("BATCH系は独立ワーカーで並列実行します。出力先は実行ごとに自動作成します。位置・傾きのカラーマップを生成し、GIFは生成しません。")
         aws_workers = int(st.number_input("AWS並列数（0で自動）", min_value=0, value=0, step=1))
         aws_chunk = int(st.number_input("タスクあたりの試行数", min_value=1, value=50, step=1))
         aws_seed = int(st.number_input("乱数seed", min_value=0, value=2026, step=1))

@@ -58,4 +58,22 @@ def render():
                                    file_name=f'{chosen[:8]}_results.csv', mime='text/csv', key='aws_csv_download')
         else:
             st.info('CSVが100MiBを超えています。SSH/SCPで取得してください。')
+    if csv.exists() and job['status'] in jobs.TERMINAL:
+        st.caption('位置・角度マップは指定時間終了時の全有効試行の平均です。設置失敗も含み、初期位置不正は欠測です。')
+        if csv.stat().st_size <= 100 * 1024**2 and st.button('ズレ量カラーマップを作成・更新', key='aws_make_maps'):
+            import pandas as pd
+            from pose_mapping import render_maps
+            try:
+                paths = render_maps(pd.read_csv(csv), folder / 'results')
+                if not paths:
+                    st.info('位置グリッドのBATCH_PARALLELで計算してください。旧CSVや条件リストV2はマップ対象外です。')
+            except (ValueError, OSError) as exc:
+                st.error(str(exc))
+        maps = sorted((folder / 'results').glob('*_error_stage_*.png'))
+        if maps:
+            selected = st.selectbox('表示するカラーマップ', maps, format_func=lambda p: p.name, key=f'pose_map_{chosen}')
+            st.image(str(selected))
+            st.download_button('マップPNGを保存', data=selected.read_bytes(), file_name=selected.name,
+                               mime='image/png', key='aws_map_download')
     st.caption(f'サーバー上の保存先：{folder}')
+

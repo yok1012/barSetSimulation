@@ -95,7 +95,7 @@ bash scripts/run_aws_batch.sh configs/aws_batch.json --workers 8 --resume
 CPU affinityと利用可能メモリ（OS用1GiB＋1ワーカー512MiBの目安）から決めます。
 厳密なメモリ上限ではないため、まず小規模実行で `htop` を確認してください。
 
-ヒートマップ・PNG/GIFはこのCLIでは生成せず、計算とCSV保存に集中します。
+位置・傾きのカラーマップPNGを完了時に生成します。GIFは生成しません。
 Streamlitでは「AWS向けに保存・再開して実行」をONにした場合に、この再開機能を利用できます。
 
 ## 運用上の範囲

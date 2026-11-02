@@ -108,11 +108,18 @@ def combine(rows):
     final_x = final_y = 0.0
     failures = {}
     max_contacts = 0
+    pose_count = 0
+    pose_sums = {'mean_position_error_um': 0.0, 'mean_alignment_error_deg': 0.0}
     for row in rows:
         if result is None:
             result = dict(row)
         n = row['trials_done']
         s = row['_successes']
+        pose_n = row.get('pose_samples', 0)
+        pose_count += pose_n
+        for key in pose_sums:
+            if pose_n:
+                pose_sums[key] += row[key] * pose_n
         total += n
         successes += s
         contacts_sum += row['avg_short_contacts'] * n
@@ -128,6 +135,8 @@ def combine(rows):
             if key.startswith('failures_'):
                 failures[key] = failures.get(key, 0) + value
     result.update(failures)
+    result['pose_samples'] = pose_count
+    result.update({key: value / pose_count if pose_count else None for key, value in pose_sums.items()})
     result.update(trials_done=total, num_trials=result['_requested_trials'],
                   success_rate=100 * successes / total,
                   avg_short_contacts=contacts_sum / total, max_short_contacts=max_contacts,
@@ -161,7 +170,7 @@ def export_csv(db, path):
 
 def fingerprint(config, chunk_size, seed):
     sources = {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-               for name in ('main.py', 'sim_runner.py', 'aws_batch.py', 'heatmap_render.py')}
+               for name in ('main.py', 'sim_runner.py', 'aws_batch.py', 'heatmap_render.py', 'pose_mapping.py')}
     versions = {name: importlib.metadata.version(name) for name in ('pymunk', 'numpy', 'pygame')}
     return encode(dict(config=config, chunk_size=chunk_size, seed=seed,
                        sources=sources, versions=versions))
@@ -274,6 +283,17 @@ def main_entry(argv=None):
                 export_csv(db, output / 'simulation_results_aws.csv')
                 for sig, handler in old_handlers.items():
                     signal.signal(sig, handler)
+            if not stopped and config.get('generate_pose_maps', True) and not is_v2:
+                from pose_mapping import render_maps
+                import pandas as pd
+                csv_path = output / 'simulation_results_aws.csv'
+                if csv_path.stat().st_size <= 100 * 1024**2:
+                    try:
+                        render_maps(pd.read_csv(csv_path), output)
+                    except ValueError as exc:
+                        logging.warning('CSV保存済み。マップ生成を省略: %s', exc)
+                else:
+                    logging.warning('CSV保存済み。100MiB超のマップ生成は探索範囲を分割してください')
             logging.info('CSV保存: %s / 状態=%s', output / 'simulation_results_aws.csv', '中断' if stopped else '完了')
             return 130 if stopped else 0
 

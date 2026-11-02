@@ -94,6 +94,7 @@ class WebJobsTests(unittest.TestCase):
         progress = jobs.read_progress(job_id)
         self.assertEqual((progress['done'], progress['total']), (2, 2))
         self.assertTrue((jobs.job_dir(job_id) / 'results' / 'simulation_results_aws.csv').exists())
+        self.assertEqual(len(list((jobs.job_dir(job_id) / 'results').glob('*_error_stage_*.png'))), 2)
 
     def test_real_worker_stop_resume_and_serial_queue(self):
         self.config['num_trials'] = 300
