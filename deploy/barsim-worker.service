@@ -1,0 +1,17 @@
+[Unit]
+Description=Bar Simulation persistent batch worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/barSetSimulation
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/barSetSimulation/.venv/bin/python -u web_worker.py
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

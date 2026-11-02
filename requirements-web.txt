@@ -1,0 +1,2 @@
+-r requirements-aws.txt
+streamlit>=1.37,<2

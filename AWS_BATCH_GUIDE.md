@@ -1,6 +1,6 @@
 # EC2での大量バッチ実行
 
-大量計算には、Streamlitではなく専用CLI `aws_batch.py` を推奨します。
+大量計算には専用CLI `aws_batch.py`、またはStreamlitのAWS向け実行を推奨します。
 既存の物理計算 `main.run_single_condition_parallel` を使い、BATCH系4モードを
 すべて並列実行します。既存UIと `sim_runner.py` の動作は変えていません。
 
@@ -96,7 +96,7 @@ CPU affinityと利用可能メモリ（OS用1GiB＋1ワーカー512MiBの目安�
 厳密なメモリ上限ではないため、まず小規模実行で `htop` を確認してください。
 
 ヒートマップ・PNG/GIFはこのCLIでは生成せず、計算とCSV保存に集中します。
-Streamlitの実行ボタンからは既存経路を使うため、この再開機能は有効になりません。
+Streamlitでは「AWS向けに保存・再開して実行」をONにした場合に、この再開機能を利用できます。
 
 ## 運用上の範囲
 
@@ -116,3 +116,9 @@ tmuxはEC2停止・再起動を越えてプロセスを維持できません。�
 
 小規模な実エンジン実行で、チャンクの集約、重複しない再開、欠落チャンクの再計算、
 設定変更の拒否、並列数による再現性、条件別設定、SIGTERM後の再開を確認します。
+
+## Streamlitから操作する場合
+
+`requirements-web.txt` と、`deploy/` のWeb・計算ワーカーの2サービスを使います。
+サイドバーの「AWS向けに保存・再開して実行」をONにして計算を登録してください。
+[Ubuntu更新・Streamlit運用ガイド](UBUNTU_UPDATE_GUIDE.md)を参照してください。

@@ -221,6 +221,18 @@ def main_entry(argv=None):
             saved_before = db.execute('SELECT COUNT(*) FROM results').fetchone()[0]
             last_report = started
             pending = {}
+            def write_progress(state):
+                elapsed = time.monotonic() - started
+                rate = completed / elapsed if elapsed > 0 else 0
+                remaining = max(0, total_tasks - saved_before - completed)
+                data = dict(state=state, done=saved_before + completed, total=total_tasks,
+                            elapsed_seconds=elapsed,
+                            eta_seconds=remaining / rate if rate else None)
+                temp = output / 'progress.json.tmp'
+                temp.write_text(encode(data), encoding='utf-8')
+                temp.replace(output / 'progress.json')
+            write_progress('running')
+            finished = False
             task_iter = iter(tasks(conditions, args.trials_per_task))
             exhausted = False
             try:
@@ -252,10 +264,13 @@ def main_entry(argv=None):
                                          saved_before + completed, total_tasks,
                                          100 * (saved_before + completed) / total_tasks,
                                          now-started, eta, rate, len(pending), psutil.virtual_memory().percent)
+                            write_progress('stopping' if stopped else 'running')
                             last_report = now
                         if stopped:
                             exhausted = True
+                finished = True
             finally:
+                write_progress('paused' if stopped else 'completed' if finished else 'failed')
                 export_csv(db, output / 'simulation_results_aws.csv')
                 for sig, handler in old_handlers.items():
                     signal.signal(sig, handler)

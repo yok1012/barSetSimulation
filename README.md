@@ -305,4 +305,12 @@ pip install pygame pymunk numpy pandas matplotlib seaborn psutil streamlit
 SQLiteへの途中保存、`--resume` による再開に対応します。
 設定例は `configs/aws_batch.json`、tmuxでの起動・監視とEC2の準備は
 [AWS大量バッチ実行ガイド](AWS_BATCH_GUIDE.md)を参照してください。
-既存Streamlit経由の実行とは別の経路です。
+CLIに加え、下記のAWS向けStreamlit実行からも利用できます。
+
+### Streamlitで大量バッチを運用する
+
+サイドバーの「AWS向けに保存・再開して実行」をONにすると、既存の条件入力から
+独立ワーカーへ計算を登録できます。履歴・進捗・ログ・停止・再開・CSV取得に対応し、
+ブラウザ切断やWebサービス再起動でも計算は継続します。
+[Ubuntu更新・Streamlit運用ガイド](UBUNTU_UPDATE_GUIDE.md)に、既存サーバーの
+更新方法（Git配置／手動アップロード）とsystemd・Tailnet設定をまとめています。

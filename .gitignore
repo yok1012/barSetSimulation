@@ -41,3 +41,4 @@ results_streamlit2/
 # AWSでの大量計算結果とログ
 aws_results/
 logs/
+requirements-installed.txt

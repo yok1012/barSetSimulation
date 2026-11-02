@@ -408,6 +408,19 @@ def _read_log_lines(log_path):
 
 def start_background_run(cfg, show_gif=True):
     """sim_runner をログファイル出力の別プロセスとして起動し、状態を保存する。"""
+    if aws_execution and cfg.get("mode", "").startswith("BATCH"):
+        import web_jobs
+        if not web_jobs.worker_online():
+            st.error("計算ワーカーが停止しています。barsim-workerサービスを起動してください。")
+            return None
+        try:
+            job_id = web_jobs.submit(cfg, workers=aws_workers or None,
+                                     chunk=aws_chunk, seed=aws_seed)
+        except (ValueError, OSError) as exc:
+            st.error(f"ジョブを登録できませんでした: {exc}")
+            return None
+        st.session_state["aws_job_selected"] = job_id
+        return {"job_id": job_id}
     cfg_path = write_config(cfg)
     out_dir = cfg["output_dir"]
     if not os.path.isabs(out_dir):
@@ -694,6 +707,14 @@ MODE_LABELS = {
 }
 
 with st.sidebar:
+    aws_execution = st.checkbox("AWS向けに保存・再開して実行", value=False,
+                                disabled=os.name != "posix")
+    aws_workers, aws_chunk, aws_seed = 0, 50, 2026
+    if aws_execution:
+        st.caption("BATCH系は独立ワーカーで並列実行します。出力先は実行ごとに自動作成し、PNG/GIFは生成しません。")
+        aws_workers = int(st.number_input("AWS並列数（0で自動）", min_value=0, value=0, step=1))
+        aws_chunk = int(st.number_input("タスクあたりの試行数", min_value=1, value=50, step=1))
+        aws_seed = int(st.number_input("乱数seed", min_value=0, value=2026, step=1))
     st.header("モード選択")
     _mode_keys = list(MODE_LABELS.keys())
     _saved_mode = S.get("mode", _mode_keys[0])
@@ -1302,4 +1323,10 @@ save_settings(S)
 # --------------------------------------------------------------------------
 # バックグラウンド実行の監視・結果表示（SINGLE/BATCH/BATCH_PARALLEL 共通）
 # --------------------------------------------------------------------------
+if os.name == "posix":
+    import web_jobs
+    if aws_execution or (web_jobs.ROOT / "queue.sqlite3").exists():
+        import web_dashboard
+        web_dashboard.render()
 render_run_monitor()
+
