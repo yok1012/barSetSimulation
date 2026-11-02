@@ -165,3 +165,13 @@ scp -i "C:\Users\255396\Documents\AWS_private_key\md_yokokawa.pem" -r ec2-user@e
 - Streamlit UIで操作したい場合だけSecurity Groupで8501番を開ける
 - 長時間計算は必ず `tmux` 内で実行する
 - 計算完了後、不要ならEC2を停止して課金を抑える
+
+
+## 大量計算を行う場合（推奨）
+
+GitHubから取得し、ブラウザUIを使わずtmux内で計算する場合は、
+[AWS大量バッチ実行ガイド](AWS_BATCH_GUIDE.md)の専用CLIを利用してください。
+CPU・メモリに応じた並列数調整、タスク単位の保存と再開に対応しています。
+
+既存Ubuntuサーバーの更新とStreamlitからの停止・再開操作については、
+[Ubuntu更新・Streamlit運用ガイド](UBUNTU_UPDATE_GUIDE.md)を参照してください。

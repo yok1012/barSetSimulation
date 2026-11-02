@@ -1,0 +1,13 @@
+{
+  "mode": "BATCH_PARALLEL",
+  "output_dir": "aws_results/run001",
+  "num_trials": 100,
+  "simulation_duration": 4.0,
+  "variability": {"x": 0, "y": 0, "angle": 0},
+  "batch_ranges": {
+    "angle": [20, 31, 10],
+    "release_x_offset": [-300, 301, 10],
+    "release_y_offset": [400, 1001, 10],
+    "relative_angle": [0]
+  }
+}

@@ -408,6 +408,19 @@ def _read_log_lines(log_path):
 
 def start_background_run(cfg, show_gif=True):
     """sim_runner をログファイル出力の別プロセスとして起動し、状態を保存する。"""
+    if aws_execution and cfg.get("mode", "").startswith("BATCH"):
+        import web_jobs
+        if not web_jobs.worker_online():
+            st.error("計算ワーカーが停止しています。barsim-workerサービスを起動してください。")
+            return None
+        try:
+            job_id = web_jobs.submit(cfg, workers=aws_workers or None,
+                                     chunk=aws_chunk, seed=aws_seed)
+        except (ValueError, OSError) as exc:
+            st.error(f"ジョブを登録できませんでした: {exc}")
+            return None
+        st.session_state["aws_job_selected"] = job_id
+        return {"job_id": job_id}
     cfg_path = write_config(cfg)
     out_dir = cfg["output_dir"]
     if not os.path.isabs(out_dir):
@@ -512,6 +525,13 @@ def show_results(mode, output_dir, show_gif=True):
         return
 
     st.subheader("実行結果")
+    maps = sorted(glob.glob(os.path.join(out, "*_error_stage_*.png")))
+    if maps:
+        st.caption("位置は理想重心からの距離、傾きは理想軸からの角度差の平均です。成功・失敗を含む指定時間終了時の値です。")
+        selected_map = st.selectbox("ズレ量カラーマップ", maps, format_func=os.path.basename)
+        st.image(selected_map)
+        with open(selected_map, "rb") as image_file:
+            st.download_button("カラーマップPNGを保存", image_file.read(), file_name=os.path.basename(selected_map), mime="image/png")
 
     if mode == "SINGLE":
         pngs = sorted(
@@ -694,6 +714,14 @@ MODE_LABELS = {
 }
 
 with st.sidebar:
+    aws_execution = st.checkbox("AWS向けに保存・再開して実行", value=False,
+                                disabled=os.name != "posix")
+    aws_workers, aws_chunk, aws_seed = 0, 50, 2026
+    if aws_execution:
+        st.caption("BATCH系は独立ワーカーで並列実行します。出力先は実行ごとに自動作成します。位置・傾きのカラーマップを生成し、GIFは生成しません。")
+        aws_workers = int(st.number_input("AWS並列数（0で自動）", min_value=0, value=0, step=1))
+        aws_chunk = int(st.number_input("タスクあたりの試行数", min_value=1, value=50, step=1))
+        aws_seed = int(st.number_input("乱数seed", min_value=0, value=2026, step=1))
     st.header("モード選択")
     _mode_keys = list(MODE_LABELS.keys())
     _saved_mode = S.get("mode", _mode_keys[0])
@@ -1152,13 +1180,13 @@ else:  # BATCH / BATCH_PARALLEL
     x1, x2, x3 = st.columns(3)
     x_start = x1.number_input("X 開始", value=int(S.get("x_start", -300)), step=5, key="xs")
     x_stop = x2.number_input("X 終了(未満)", value=int(S.get("x_stop", 300)), step=5, key="xe")
-    x_step = x3.number_input("X 刻み", value=int(S.get("x_step", 50)), min_value=1, step=5, key="xst")
+    x_step = x3.number_input("X 刻み", value=int(S.get("x_step", 10)), min_value=1, step=5, key="xst")
 
     st.markdown("**リリース Z オフセット (μm)**")
     y1, y2, y3 = st.columns(3)
     y_start = y1.number_input("Z 開始", value=int(S.get("y_start", 400)), step=5, key="ys")
     y_stop = y2.number_input("Z 終了(未満)", value=int(S.get("y_stop", 1000)), step=5, key="ye")
-    y_step = y3.number_input("Z 刻み", value=int(S.get("y_step", 50)), min_value=1, step=5, key="yst")
+    y_step = y3.number_input("Z 刻み", value=int(S.get("y_step", 10)), min_value=1, step=5, key="yst")
 
     rel_text = st.text_input("相対リリース角度のリスト (カンマ区切り)", value=str(S.get("rel_text", "0")))
 
@@ -1302,4 +1330,10 @@ save_settings(S)
 # --------------------------------------------------------------------------
 # バックグラウンド実行の監視・結果表示（SINGLE/BATCH/BATCH_PARALLEL 共通）
 # --------------------------------------------------------------------------
+if os.name == "posix":
+    import web_jobs
+    if aws_execution or (web_jobs.ROOT / "queue.sqlite3").exists():
+        import web_dashboard
+        web_dashboard.render()
 render_run_monitor()
+

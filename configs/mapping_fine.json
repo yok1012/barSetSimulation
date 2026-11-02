@@ -1,0 +1,32 @@
+{
+  "mode": "BATCH_PARALLEL",
+  "output_dir": "aws_results/mapping_fine",
+  "num_trials": 10,
+  "simulation_duration": 4.0,
+  "angle_linked_offset": false,
+  "variability": {
+    "x": 10,
+    "y": 10,
+    "angle": 1
+  },
+  "batch_ranges": {
+    "angle": [
+      30,
+      31,
+      1
+    ],
+    "release_x_offset": [
+      -600,
+      601,
+      10
+    ],
+    "release_y_offset": [
+      0,
+      1201,
+      10
+    ],
+    "relative_angle": [
+      0
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Bar Simulation Streamlit UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/barSetSimulation
+Environment=PYTHONUNBUFFERED=1
+Environment=MPLBACKEND=Agg
+Environment=SDL_VIDEODRIVER=dummy
+Environment=SDL_AUDIODRIVER=dummy
+ExecStart=/home/ubuntu/barSetSimulation/.venv/bin/python -m streamlit run streamlit_app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

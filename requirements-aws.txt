@@ -1,0 +1,9 @@
+# Python 3.12を推奨。Streamlit UIは大量実行CLIには不要。
+pygame>=2.6,<3
+pymunk>=7,<8
+numpy>=2,<3
+pandas>=2.2,<4
+matplotlib>=3.9,<4
+seaborn>=0.13,<0.14
+psutil>=6,<8
+Pillow>=11,<14

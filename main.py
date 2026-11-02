@@ -1888,8 +1888,7 @@ def run_single_condition_parallel(params_data):
                 if bar.body.position.y >= HEIGHT - 10:
                     floor_hit_flag[0] = True
                 
-                if (floor_hit_flag[0] and ENABLE_FLOOR_FAIL_VALIDATION) or wall_hit_flag[0]:
-                    break
+                # 姿勢マップは失敗時も指定時間の終端で評価するため、途中終了しない。
             
             # 失敗理由の判定
             fail_reason = None
@@ -1913,8 +1912,8 @@ def run_single_condition_parallel(params_data):
                 'x_offset': random_x_offset,
                 'y_offset': random_y_offset,
                 'angle_offset': random_angle_offset,
-                'final_pos': (bar.body.position.x, bar.body.position.y) if is_success else None,
-                'final_angle': bar.body.angle if is_success else None
+                'final_pos': (bar.body.position.x, bar.body.position.y),
+                'final_angle': bar.body.angle
             })
             
             if is_success:
@@ -1943,222 +1942,51 @@ def run_single_condition_parallel(params_data):
 
 
 def run_batch_mode_parallel():
-    """
-    並列処理版のBATCHモード
-    """
-    import traceback
-    
-    if not LIBRARIES_INSTALLED:
-        print("エラー: BATCHモードに必要なライブラリがありません。")
-        return
-    
-    if not PARALLEL_AVAILABLE:
-        print("警告: 並列処理ライブラリが利用できません。通常のBATCHモードを実行します。")
-        return run_batch_mode()
-    
-    print("=== 高速並列処理モードを開始します ===")
-
-    # CPU数を取得
-    cpu_cores = cpu_count()
-    max_workers = min(cpu_cores, 64)  # AWS大型インスタンス用に64プロセスまで対応
-    save_interval = 10  # 10タスクごとに保存（メモリ節約のため頻繁に保存）
-    print(f"利用可能CPU数: {cpu_cores}, 使用プロセス数: {max_workers}")
-    print(f"中間保存間隔: {save_interval}タスクごと")
-    
-    param_names = list(BATCH_PARAM_RANGES.keys())
-    param_combinations = list(itertools.product(*BATCH_PARAM_RANGES.values()))
-    total_combinations = len(param_combinations)
-    
-    print(f"合計 {total_combinations} 通りのパラメータを、各{NUM_TRIALS_PER_CONDITION}回試行します。")
-    print(f"総試行回数: {total_combinations * NUM_TRIALS_PER_CONDITION}")
-    
-    # spawn 方式のワーカーは main.py を新規 import するため、sim_runner が親プロセスで
-    # 上書きしたモジュールグローバルは引き継がれない。脱着力（初速度）と
-    # 摩擦・反発係数の設定はタスクに同梱して各ワーカー側で復元する。
-    worker_settings = collect_worker_settings()
-
-    # 各条件とその試行範囲をタスクとして準備
-    tasks = []
-    for params_tuple in param_combinations:
-        current_params = dict(zip(param_names, params_tuple))
-        
-        # 試行を分割して並列処理
-        trials_per_chunk = max(1, NUM_TRIALS_PER_CONDITION // max_workers)
-        trial_chunks = []
-        
-        for i in range(0, NUM_TRIALS_PER_CONDITION, trials_per_chunk):
-            end_trial = min(i + trials_per_chunk, NUM_TRIALS_PER_CONDITION)
-            trial_range = list(range(i + 1, end_trial + 1))
-            trial_chunks.append(trial_range)
-        
-        # 各チャンクをタスクとして追加
-        for chunk in trial_chunks:
-            tasks.append((current_params, chunk, worker_settings))
-    
-    print(f"並列タスク数: {len(tasks)}")
-    
-    # 結果を格納するリスト
-    all_results = []
-    completed_tasks = 0
-    start_time = time.time()
-    
-    def save_current_results(current_results_list):
-        if not current_results_list: return
-        
-        # 結果を統合
-        condition_results = {}
-        for params, successful_runs, trial_results in current_results_list:
-            key = tuple(sorted(params.items()))
-            if key not in condition_results:
-                condition_results[key] = {'params': params, 'successful_runs': [], 'trial_results': []}
-            condition_results[key]['successful_runs'].extend(successful_runs)
-            condition_results[key]['trial_results'].extend(trial_results)
-            
-        results_data = []
-        for key, data in condition_results.items():
-            params = data['params']
-            successful_runs = data['successful_runs']
-            trial_results = data['trial_results']
-            
-            # 全ての試行が揃っていない場合でも集計する
-            if not trial_results: continue
-            
-            success_rate = (len(successful_runs) / len(trial_results)) * 100
-            stage_angle_rad = math.radians(-params['angle'])
-            
-            failure_reasons = {}
-            for result in trial_results:
-                if not result['success']:
-                    reason = result['reason']
-                    failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
-            
-            short_contact_counts = [result['short_contacts'] for result in trial_results]
-            avg_short_contacts = np.mean(short_contact_counts) if short_contact_counts else 0
-            max_short_contacts = max(short_contact_counts) if short_contact_counts else 0
-            
-            ideal_x, ideal_y = calculate_ideal_position(stage_angle_rad)
-            avg_final_x = np.mean([run['pos'].x for run in successful_runs]) if successful_runs else None
-            avg_final_y = np.mean([run['pos'].y for run in successful_runs]) if successful_runs else None
-            diff = math.sqrt((ideal_x - avg_final_x) ** 2 + (ideal_y - avg_final_y) ** 2) if avg_final_x is not None else None
-            
-            x_offsets = [result['x_offset'] for result in trial_results]
-            y_offsets = [result['y_offset'] for result in trial_results]
-            angle_offsets = [result['angle_offset'] for result in trial_results]
-            
-            condition_result = {
-                **params,
-                'success_rate': success_rate,
-                'ideal_x': ideal_x, 'ideal_y': ideal_y,
-                'avg_final_x': avg_final_x, 'avg_final_y': avg_final_y,
-                'difference_from_ideal_px': diff,
-                'avg_short_contacts': avg_short_contacts,
-                'max_short_contacts': max_short_contacts,
-                'failures_floor': failure_reasons.get('floor_contact', 0),
-                'failures_multi_short': failure_reasons.get('multiple_short_contacts', 0),
-                'failures_unstable': failure_reasons.get('不安定', 0),
-                'failures_angle': failure_reasons.get('角度不正', 0),
-                'failures_position': failure_reasons.get('位置誤差大', 0),
-                'failures_no_contact': failure_reasons.get('未接触', 0),
-                'failures_invalid_pos': failure_reasons.get('invalid_initial_position', 0),
-                'x_offset_std': np.std(x_offsets),
-                'y_offset_std': np.std(y_offsets),
-                'angle_offset_std': np.std(angle_offsets)
-            }
-            results_data.append(condition_result)
-            
-        if results_data:
-            df = pd.DataFrame(results_data)
-            if 'difference_from_ideal_px' in df.columns:
-                df['difference_from_ideal_mm'] = df['difference_from_ideal_px'] / PPM
-            csv_filepath = os.path.join(OUTPUT_DIR, "simulation_results_parallel.csv")
-            df.to_csv(csv_filepath, index=False, float_format='%.3f')
-
-    # 並列処理実行
-    with Pool(processes=max_workers) as pool:
-        # 非同期でタスクを投入
-        async_results = []
-        for task in tasks:
-            async_result = pool.apply_async(run_single_condition_parallel, (task,))
-            async_results.append(async_result)
-        
-        # 結果を順次取得（進捗表示付き）
-        for i, async_result in enumerate(async_results):
-            try:
-                result = async_result.get(timeout=120)  # 2分のタイムアウト
-                all_results.append(result)
-                completed_tasks += 1
-
-                # 中間保存＋メモリ解放
-                if completed_tasks % save_interval == 0:
-                    save_current_results(all_results)
-                    # CSVに保存済みなので、メモリからクリア
-                    all_results.clear()
-                    import gc
-                    gc.collect()  # ガベージコレクション強制実行
-
-                # 進捗表示
-                progress = (completed_tasks / len(async_results)) * 100
-                elapsed = time.time() - start_time
-                estimated_total = elapsed / (completed_tasks / len(async_results))
-                remaining = estimated_total - elapsed
-
-                # メモリ使用量の表示
-                mem_info = ""
-                if PSUTIL_AVAILABLE:
-                    mem = psutil.virtual_memory()
-                    mem_used_gb = mem.used / (1024**3)
-                    mem_percent = mem.percent
-                    mem_info = f" | メモリ: {mem_used_gb:.1f}GB ({mem_percent:.1f}%)"
-
-                print(f"\r進捗: {completed_tasks}/{len(async_results)} ({progress:.1f}%) "
-                      f"経過時間: {elapsed:.1f}s 残り時間: {remaining:.1f}s{mem_info}", end="", flush=True)
-                
-            except Exception as e:
-                print(f"\nタスク {i+1} でエラーが発生しました: {e}")
-                traceback.print_exc()
-                completed_tasks += 1
-    
-    print(f"\n\n=== 並列処理完了 ===")
-    print(f"総実行時間: {time.time() - start_time:.1f}秒")
-
-    # 最終結果の保存（残りがある場合のみ）
-    if all_results:
-        save_current_results(all_results)
-        all_results.clear()
-
-    # メモリ解放
-    import gc
-    gc.collect()
-    
-    # ここから先は結果表示用（読み込み直して表示）
-    csv_filepath = os.path.join(OUTPUT_DIR, "simulation_results_parallel.csv")
-    if os.path.exists(csv_filepath):
-        df = pd.read_csv(csv_filepath)
-        
-        # 結果の概要を表示
-        print(f"\n=== 高速BATCH実行結果概要 ===")
-        print(f"総パラメータ条件数: {len(df)}")
-        print(f"各条件の試行回数: {NUM_TRIALS_PER_CONDITION} (推定)")
-        print(f"")
-        print(f"全体成功率: {df['success_rate'].mean():.1f}% (範囲: {df['success_rate'].min():.1f}%-{df['success_rate'].max():.1f}%)")
-        print(f"平均短冊接触回数: {df['avg_short_contacts'].mean():.2f}回")
-        print(f"最大短冊接触回数: {df['max_short_contacts'].max():.0f}回")
-        
-        # ヒートマップの生成
-        if LIBRARIES_INSTALLED:
-            print("\nヒートマップを生成中...")
-            generate_heatmaps(df)
-            print("ヒートマップの生成が完了しました。")
-    else:
-        print("結果ファイルが生成されませんでした。")
-
-    return # 元の関数の残りをスキップ
-
-# 以下は元の関数の残骸ですが、上のreturnで終了するため実行されません
-# 既存コードとの整合性を保つため、完全に置き換える形にします
-def _unused_legacy_code():
-    pass
-
+    """投入数を制限し、条件単位の結果をCSVへ順次保存する並列バッチ。"""
+    import csv
+    from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+    from pose_mapping import render_maps
+    settings = collect_worker_settings()
+    names = list(BATCH_PARAM_RANGES)
+    combinations = itertools.product(*BATCH_PARAM_RANGES.values())
+    tasks = ((dict(zip(names, values)), range(1, NUM_TRIALS_PER_CONDITION + 1), settings)
+             for values in combinations)
+    workers = min(cpu_count(), 64)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(OUTPUT_DIR, 'simulation_results_parallel.csv')
+    with open(path, 'w', newline='', encoding='utf-8') as stream:
+        writer = None
+        pending = set()
+        exhausted = False
+        with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context('spawn')) as pool:
+            while pending or not exhausted:
+                while not exhausted and len(pending) < workers * 2:
+                    task = next(tasks, None)
+                    if task is None:
+                        exhausted = True
+                    else:
+                        pending.add(pool.submit(run_single_condition_parallel, task))
+                if not pending:
+                    break
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    params, successful, trials = future.result()
+                    if any(t['reason'].startswith('error:') for t in trials):
+                        raise RuntimeError('試行中にエラーが発生しました。設定と依存関係を確認してください')
+                    row = summarize_condition_result(params, successful, trials, NUM_TRIALS_PER_CONDITION)
+                    row.update(v2_settings_columns(settings))
+                    row['difference_from_ideal_mm'] = (row['difference_from_ideal_px'] / 1000
+                                                       if row['difference_from_ideal_px'] is not None else None)
+                    if writer is None:
+                        writer = csv.DictWriter(stream, fieldnames=list(row))
+                        writer.writeheader()
+                    writer.writerow(row)
+                    stream.flush()
+    if writer is not None:
+        df = pd.read_csv(path)
+        render_maps(df, OUTPUT_DIR)
+        generate_heatmaps(df)
+    print(f'並列バッチ完了: {path}', flush=True)
 
 
 def run_batch_mode():
@@ -2532,7 +2360,9 @@ def summarize_condition_result(params, successful_runs_data, trial_results, num_
     y_offsets = [result['y_offset'] for result in trial_results]
     angle_offsets = [result['angle_offset'] for result in trial_results]
 
+    from pose_mapping import summarize_pose
     return {
+        **summarize_pose(trial_results, (ideal_x, ideal_y), stage_angle_rad),
         **params,
         'num_trials': num_trials,
         'trials_done': len(trial_results),
@@ -2738,3 +2568,4 @@ if __name__ == "__main__":
         run_single_condition_mode()
     else:
         print(f"エラー: 無効なモード '{MODE}'")
+

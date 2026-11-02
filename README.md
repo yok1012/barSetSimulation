@@ -297,3 +297,26 @@ pip install pygame pymunk numpy pandas matplotlib seaborn psutil streamlit
 - Python 3.6+（動作確認は 3.12）
 - マルチコア CPU 推奨（BATCH_PARALLEL モード）
 - 日本語フォント `ipaexg.ttf`（リポジトリ同梱、グラフ・UI の日本語表示用）
+
+
+## AWSで大量にバッチ処理する場合
+
+専用CLI `aws_batch.py` はCPU・メモリに応じた並列数調整、投入タスク数の制限、
+SQLiteへの途中保存、`--resume` による再開に対応します。
+設定例は `configs/aws_batch.json`、tmuxでの起動・監視とEC2の準備は
+[AWS大量バッチ実行ガイド](AWS_BATCH_GUIDE.md)を参照してください。
+CLIに加え、下記のAWS向けStreamlit実行からも利用できます。
+
+### Streamlitで大量バッチを運用する
+
+サイドバーの「AWS向けに保存・再開して実行」をONにすると、既存の条件入力から
+独立ワーカーへ計算を登録できます。履歴・進捗・ログ・停止・再開・CSV取得に対応し、
+ブラウザ切断やWebサービス再起動でも計算は継続します。
+[Ubuntu更新・Streamlit運用ガイド](UBUNTU_UPDATE_GUIDE.md)に、既存サーバーの
+更新方法（Git配置／手動アップロード）とsystemd・Tailnet設定をまとめています。
+
+### 落下位置・整列角度のカラーマップ
+
+BATCH_PARALLELでは、落下開始位置ごとに「理想重心からの平均距離（μm）」と
+「理想軸からの平均傾き（度）」をCSVと2種類のカラーマップPNGに出力します。
+[位置・傾きマッピングガイド](POSE_MAPPING_GUIDE.md)で、測定時点・集計方法・画面操作を説明しています。
