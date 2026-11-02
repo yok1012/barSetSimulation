@@ -33,6 +33,7 @@ def render_maps(frame, output_dir):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
     import numpy as np
     if frame.empty or 'mean_position_error_um' not in frame:
         return []
@@ -53,16 +54,18 @@ def render_maps(frame, output_dir):
         ):
             grid = part.pivot(index='release_y_offset', columns='release_x_offset', values=column).reindex(index=ys, columns=xs)
             values = np.ma.masked_invalid(grid.to_numpy(dtype=float))
-            vmax = (float(frame[column].max()) if frame[column].notna().any() else 1.0) if name == 'position_error' else 90.0
+            vmax = 300.0 if name == 'position_error' else 20.0
             cmap = plt.get_cmap('viridis').with_extremes(bad='#bdbdbd')
             fig, ax = plt.subplots(figsize=(9, 7))
             try:
-                mesh = ax.pcolormesh(edges(xs), edges(ys), values, cmap=cmap, vmin=0, vmax=max(vmax, 1e-9), shading='flat')
+                mesh = ax.pcolormesh(edges(xs), edges(ys), values, cmap=cmap, norm=Normalize(vmin=0, vmax=vmax, clip=True), shading='flat')
                 linked = bool(part.iloc[0].get('angle_linked_offset', False))
                 ax.set_xlabel('Release X offset from ideal (um)' + (' [stage axis]' if linked else ''))
                 ax.set_ylabel('Release Z offset from ideal (um)' + (' [wall axis]' if linked else ''))
                 ax.set_title(f'{label}\nStage={angle:g} deg, initial relative={relative:g} deg; gray=no samples')
-                fig.colorbar(mesh, ax=ax, label=label)
+                ticks = [0, 50, 100, 150, 200, 250, 300] if name == 'position_error' else [0, 5, 10, 15, 20]
+                colorbar = fig.colorbar(mesh, ax=ax, label=label, ticks=ticks)
+                colorbar.ax.set_yticklabels([str(t) for t in ticks[:-1]] + [f'{ticks[-1]}+'])
                 fig.tight_layout()
                 path = output / f'{name}_stage_{angle:g}_relative_{relative:g}.png'
                 fig.savefig(path, dpi=150)
