@@ -297,3 +297,12 @@ pip install pygame pymunk numpy pandas matplotlib seaborn psutil streamlit
 - Python 3.6+（動作確認は 3.12）
 - マルチコア CPU 推奨（BATCH_PARALLEL モード）
 - 日本語フォント `ipaexg.ttf`（リポジトリ同梱、グラフ・UI の日本語表示用）
+
+
+## AWSで大量にバッチ処理する場合
+
+専用CLI `aws_batch.py` はCPU・メモリに応じた並列数調整、投入タスク数の制限、
+SQLiteへの途中保存、`--resume` による再開に対応します。
+設定例は `configs/aws_batch.json`、tmuxでの起動・監視とEC2の準備は
+[AWS大量バッチ実行ガイド](AWS_BATCH_GUIDE.md)を参照してください。
+既存Streamlit経由の実行とは別の経路です。
